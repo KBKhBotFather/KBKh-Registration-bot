@@ -28,7 +28,9 @@ def get_db_connection():
     return psycopg2.connect(DB_URI)
 
 # 🏢 Teams & Categories Mapping
-TEAMS = ["Team Alpha", "Team Beta", "Team Gamma", "Team Electron", "Team Proton", "Team Neutron"]
+INFO_TEAMS = ["Team Alpha", "Team Beta", "Team Gamma"]
+MEME_TEAMS = ["Team Electron", "Team Proton", "Team Neutron"]
+TEAMS = INFO_TEAMS + MEME_TEAMS
 
 TEAM_SLUGS = {
     "alpha": "Team Alpha",
@@ -41,18 +43,18 @@ TEAM_SLUGS = {
 
 user_temp_data = {}
 
-# 🔑 Security Code Generator
+# 🔑 Security Code Generator (KBKh2022n Format)
 def generate_security_code(conn):
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT nextval('security_code_seq')")
         seq_val = cursor.fetchone()[0]
-        return f"KBKh{seq_val}"
+        return f"KBKh2022{seq_val}"
     except Exception:
         conn.rollback()
         cursor.execute("SELECT COUNT(*) FROM members WHERE security_code IS NOT NULL")
-        cnt = cursor.fetchone()[0] + 101
-        return f"KBKh{cnt}"
+        cnt = cursor.fetchone()[0] + 1
+        return f"KBKh2022{cnt}"
 
 # 🔍 User Status Checker
 def get_user_status(tg_id):
@@ -548,13 +550,41 @@ def reg_confirm(message):
     data = user_temp_data.get(tg_id, {})
     data['team_name'] = selected_team
     data['user_type'] = "General Member"
+    unique_id = data.get('unique_id', '').strip()
+
+    # 🔍 Check Category-wise Unique ID Uniqueness
+    if selected_team in INFO_TEAMS:
+        cat_teams = INFO_TEAMS
+        cat_name = "Info Team (Alpha/Beta/Gamma)"
+    else:
+        cat_teams = MEME_TEAMS
+        cat_name = "Meme Team (Electron/Proton/Neutron)"
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        # একই ক্যাটাগরির মধ্যে Unique ID আগে ব্যবহার করা হয়েছে কিনা তা চেক
+        cursor.execute(
+            "SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s)",
+            (unique_id, cat_teams)
+        )
+        exists_count = cursor.fetchone()[0]
+
+        if exists_count > 0:
+            conn.close()
+            bot.send_message(
+                message.chat.id,
+                f"⚠️ **এই Unique ID-টি ({unique_id}) `{cat_name}` ক্যাটাগরিতে ইতিমধ্যেই ব্যবহৃত হয়েছে!**\n\n"
+                f"একই ক্যাটাগরির ভেতরে একাধিক সদস্যের Unique ID এক হতে পারবে না। অনুগ্রহ করে আপনার সঠিক Unique ID প্রদান করুন।",
+                parse_mode="Markdown",
+                reply_markup=main_menu(tg_id)
+            )
+            return
+
         cursor.execute(
             "INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')",
-            (tg_id, data.get('fb_name', ''), data.get('full_name', ''), data.get('unique_id', ''), data['team_name'], data['user_type'])
+            (tg_id, data.get('fb_name', ''), data.get('full_name', ''), unique_id, data['team_name'], data['user_type'])
         )
         conn.commit()
         conn.close()
@@ -576,14 +606,14 @@ def reg_confirm(message):
                 f"📥 **নতুন রেজিস্ট্রেশন আবেদন!**\n\n"
                 f"👤 **FB Name:** {data.get('fb_name', '')}\n"
                 f"📛 **Full Name:** {data.get('full_name', '')}\n"
-                f"🆔 **Unique ID:** {data.get('unique_id', '')}\n"
+                f"🆔 **Unique ID:** {unique_id}\n"
                 f"🌐 **Team:** {data['team_name']}\n"
                 f"🆔 **TG ID:** `{tg_id}`"
             )
             bot.send_message(ADMIN_CHAT_ID, admin_alert, parse_mode="Markdown", reply_markup=admin_markup)
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ রেজিস্ট্রেশন ব্যর্থ হয়েছে (সম্ভবত এই Unique ID বা Telegram ID আগে ব্যবহার করা হয়েছে): {e}", reply_markup=main_menu(tg_id))
+        bot.send_message(message.chat.id, f"⚠️ রেজিস্ট্রেশন ব্যর্থ হয়েছে: {e}", reply_markup=main_menu(tg_id))
 
 # ----------------------------------------------------
 # 👑 6. ADMIN OPTIONS (Pending & Members List)
