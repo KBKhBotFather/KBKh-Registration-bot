@@ -71,10 +71,10 @@ def get_user_status(tg_id):
         print(f"DB Error: {e}")
         return "UNREGISTERED"
 
-# 📱 Keyboards (Strict Access Control)
+# 📱 Keyboards (Permanent & Resizable Keyboard)
 def main_menu(user_id):
     status = get_user_status(user_id)
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False)
 
     if status == "ADMIN":
         markup.add(
@@ -99,12 +99,12 @@ def main_menu(user_id):
     return markup
 
 def cancel_keyboard():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     markup.add(KeyboardButton("❌ Cancel"))
     return markup
 
 def teams_keyboard():
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=True)
+    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False)
     markup.add(
         KeyboardButton("Team Alpha"),
         KeyboardButton("Team Beta"),
@@ -180,7 +180,7 @@ def send_welcome(message):
     status = get_user_status(tg_id)
 
     if status == "ADMIN":
-        text = "👑 **Admin Panel-এ আপনাকে স্বাগতম!**\n\nপেন্ডিং রেজিস্ট্রেশন বা মেম্বারদের তালিকা দেখতে নিচের দুটি অপশন ব্যবহার করুন।"
+        text = "👑 **Admin Panel-এ আপনাকে স্বাগতম!**\n\nপেন্ডিং রেজিস্ট্রেশন বা মেম্বারদের তালিকা দেখতে নিচের অপশনগুলো ব্যবহার করুন।"
     elif status == "Approved":
         text = "👋 **KBKh Science Ecosystem-এ আপনাকে স্বাগতম!**\n\nআপনি একজন এপ্রুভড মেম্বার। প্রোফাইল দেখতে বা নাম পরিবর্তন করতে নিচের অপশন ব্যবহার করুন।"
     elif status == "Pending":
@@ -296,7 +296,7 @@ def process_fb_name_change(message):
 
             if ADMIN_CHAT_ID:
                 admin_note = f"🔔 **FB Name Changed!**\n**Old Name:** {old_fb_name}\n**New Name:** {new_fb_name}\n**Team:** {team}"
-                bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown")
+                bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown", reply_markup=main_menu(ADMIN_CHAT_ID))
         else:
             conn.close()
             bot.send_message(message.chat.id, "❌ ডাটা পাওয়া যায়নি! আপনি নিবন্ধিত নন।", reply_markup=main_menu(tg_id))
@@ -431,7 +431,7 @@ def process_team_change_request(message):
 
         if ADMIN_CHAT_ID:
             admin_note = f"🔄 **Team Change Request!**\n🆔 **TG ID:** `{tg_id}`\n**Old Team:** {old_team}\n**New Team:** {requested_team}"
-            bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown")
+            bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown", reply_markup=main_menu(ADMIN_CHAT_ID))
 
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
@@ -602,7 +602,7 @@ def admin_pending_list_msg(message):
         conn.close()
 
         if not pending_users:
-            bot.send_message(message.chat.id, "✅ কোনো পেন্ডিং রেজিস্ট্রেশন আবেদন নেই।")
+            bot.send_message(message.chat.id, "✅ কোনো পেন্ডিং রেজিস্ট্রেশন আবেদন নেই।", reply_markup=main_menu(message.from_user.id))
             return
 
         markup = InlineKeyboardMarkup()
@@ -611,7 +611,7 @@ def admin_pending_list_msg(message):
 
         bot.send_message(message.chat.id, f"⏳ **পেন্ডিং আবেদনের তালিকা ({len(pending_users)} জন):**", parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ এরর: {e}")
+        bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ এরর: {e}", reply_markup=main_menu(message.from_user.id))
 
 @bot.message_handler(func=lambda msg: msg.text == "📋 Members List")
 def admin_members_list_msg(message):
@@ -717,7 +717,8 @@ def handle_all_callbacks(call):
                 f"স্বাগতম **{mem[0]}**!\n"
                 f"🌐 **টিম:** {mem[1]}\n"
                 f"🔑 **আপনার সিকিউরিটি কোড:** `{code}`\n\n"
-                f"⚠️ *এই সিকিউরিটি কোডটি কোথাও সেভ করে রাখুন। পরবর্তীতে অ্যাকাউন্ট রিকভারিতে লাগবে।*"
+                f"🔓 **আপনার জন্য আমাদের বাকি ২টি বট আনলক করা হয়েছে!**\n\n"
+                f"⚠️ *এই সিকিউরিটি কোডটি সেভ করে রাখুন। পরবর্তীতে একাউন্ট রিকভারিতে লাগবে।*"
             )
             bot.send_message(target_id, approve_msg, parse_mode="Markdown", reply_markup=main_menu(target_id))
         except Exception:
