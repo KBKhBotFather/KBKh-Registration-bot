@@ -1,1117 +1,164 @@
+import logging
 import os
 import threading
-import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+
 import psycopg2
-from psycopg2.extras import RealDictCursor
-from flask import Flask
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-# ⚙️ Environment Variables
+# Render Port Binding
+def run_dummy_server():
+  port = int(os.environ.get("PORT", 10000))
+  server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+  server.serve_forever()
+
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DB_URI = os.environ.get("DB_URI")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+ADMIN_ID = os.environ.get("ADMIN_ID")
 
-bot = telebot.TeleBot(BOT_TOKEN)
 
-# 🌐 Flask Server for Render/Uptime
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "KBKh Registration Bot is Alive & Running!"
-
-def run_flask():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-# 🔌 Database Connection Helper
 def get_db_connection():
-    return psycopg2.connect(DB_URI)
+  return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-# 🛠️ Auto DB Tables Setup
-def init_db():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS fb_name_requests (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT,
-                old_name TEXT,
-                new_name TEXT,
-                status TEXT DEFAULT 'Pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS team_change_requests (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT,
-                old_team TEXT,
-                requested_team TEXT,
-                status TEXT DEFAULT 'Pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"DB Init Error: {e}")
 
-init_db()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  user = update.effective_user
 
-# 🏢 Teams & Categories Mapping
-INFO_TEAMS = ["Team Alpha", "Team Beta", "Team Gamma"]
-MEME_TEAMS = ["Team Electron", "Team Proton", "Team Neutron"]
-TEAMS = INFO_TEAMS + MEME_TEAMS
+  # মেম্বার আগে থেকে রেজিস্টার্ড কি না চেক করা
+  conn = get_db_connection()
+  cur = conn.cursor()
+  cur.execute(
+      "SELECT status FROM members WHERE telegram_id = %s", (user.id,)
+  )
+  res = cur.fetchone()
+  conn.close()
 
-TEAM_SLUGS = {
-    "alpha": "Team Alpha",
-    "beta": "Team Beta",
-    "gamma": "Team Gamma",
-    "electron": "Team Electron",
-    "proton": "Team Proton",
-    "neutron": "Team Neutron"
-}
-
-user_temp_data = {}
-
-# 🔑 Security Code Generator (KBKh2022n Format)
-def generate_security_code(conn):
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT nextval('security_code_seq')")
-        seq_val = cursor.fetchone()[0]
-        return f"KBKh2022{seq_val}"
-    except Exception:
-        conn.rollback()
-        cursor.execute("SELECT COUNT(*) FROM members WHERE security_code IS NOT NULL")
-        cnt = cursor.fetchone()[0] + 1
-        return f"KBKh2022{cnt}"
-
-# 🔍 User Status Checker
-def get_user_status(tg_id):
-    if ADMIN_CHAT_ID and str(tg_id) == str(ADMIN_CHAT_ID):
-        return "ADMIN"
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT status FROM members WHERE telegram_id = %s", (tg_id,))
-        res = cursor.fetchone()
-        conn.close()
-        if res:
-            return res[0]  # 'Pending', 'Approved', 'Blocked'
-        return "UNREGISTERED"
-    except Exception as e:
-        print(f"DB Error: {e}")
-        return "UNREGISTERED"
-
-# 📱 Keyboards (Permanent & Resizable Keyboard)
-def main_menu(user_id):
-    status = get_user_status(user_id)
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False)
-
-    if status == "ADMIN":
-        markup.add(
-            KeyboardButton("⏳ Pending Permissions"),
-            KeyboardButton("📋 Members List")
-        )
-    elif status == "Approved":
-        markup.add(
-            KeyboardButton("👤 My Profile"),
-            KeyboardButton("🔄 Change FB Name"),
-            KeyboardButton("🔄 Request Team Change")
-        )
-    elif status == "Pending":
-        markup.add(
-            KeyboardButton("🔄 Check Status / Refresh")
-        )
-    elif status == "Blocked":
-        return None
-    else:  # UNREGISTERED
-        markup.add(
-            KeyboardButton("📝 Register Now"),
-            KeyboardButton("🔑 Already Registered?")
-        )
-    return markup
-
-def cancel_keyboard():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    markup.add(KeyboardButton("❌ Cancel"))
-    return markup
-
-def teams_keyboard():
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False)
-    markup.add(
-        KeyboardButton("Team Alpha"),
-        KeyboardButton("Team Beta"),
-        KeyboardButton("Team Gamma"),
-        KeyboardButton("Team Electron"),
-        KeyboardButton("Team Proton"),
-        KeyboardButton("Team Neutron"),
-        KeyboardButton("❌ Cancel")
-    )
-    return markup
-
-# 🛑 Cancel Interceptor
-def check_cancel_or_menu(message, retry_fn, retry_msg, retry_keyboard=None):
-    text = message.text.strip() if message.text else ""
-    tg_id = message.from_user.id
-
-    if text in ["❌ Cancel", "/cancel"]:
-        user_temp_data[tg_id] = user_temp_data.get(tg_id, {})
-        user_temp_data[tg_id]['retry_fn'] = retry_fn
-        user_temp_data[tg_id]['retry_msg'] = retry_msg
-        user_temp_data[tg_id]['retry_keyboard'] = retry_keyboard
-
-        confirm_markup = InlineKeyboardMarkup()
-        confirm_markup.add(
-            InlineKeyboardButton("✅ হ্যাঁ, বাতিল করুন", callback_data="confirm_cancel"),
-            InlineKeyboardButton("❌ না, চালিয়ে যান", callback_data="deny_cancel")
-        )
-        bot.send_message(
-            message.chat.id, 
-            "⚠️ **আপনি কি নিশ্চিত যে প্রসেসটি বাতিল করতে চান?**", 
-            parse_mode="Markdown", 
-            reply_markup=confirm_markup
-        )
-        return True, "asking_cancel"
-
-    menu_buttons = [
-        "📝 Register Now", "🔄 Change FB Name", "🔑 Already Registered?", 
-        "👤 My Profile", "🔄 Request Team Change", "⏳ Pending Permissions", 
-        "📋 Members List", "🔄 Check Status / Refresh"
-    ]
-
-    if text in menu_buttons:
-        bot.clear_step_handler_by_chat_id(message.chat.id)
-        handle_menu_action(message, text)
-        return True, "switched_menu"
-
-    return False, None
-
-def handle_menu_action(message, action):
-    if action == "📝 Register Now":
-        reg_start(message)
-    elif action == "🔄 Change FB Name":
-        change_fb_name_start(message)
-    elif action == "🔑 Already Registered?":
-        recovery_start(message)
-    elif action == "👤 My Profile":
-        view_profile(message)
-    elif action == "🔄 Request Team Change":
-        team_change_start(message)
-    elif action == "⏳ Pending Permissions":
-        admin_pending_permissions_menu(message)
-    elif action == "📋 Members List":
-        admin_members_list_msg(message)
-    elif action == "🔄 Check Status / Refresh":
-        check_status_refresh(message)
-
-# ----------------------------------------------------
-# 📌 /start Command
-# ----------------------------------------------------
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
-
-    if status == "Blocked":
-        bot.send_message(message.chat.id, "❌ **আপনাকে সিস্টেম থেকে ব্লক করা হয়েছে!**")
-        return
-    elif status == "ADMIN":
-        text = "👑 **Admin Panel-এ আপনাকে স্বাগতম!**\n\nপেন্ডিং পারমিশন বা মেম্বারদের তালিকা দেখতে নিচের অপশনগুলো ব্যবহার করুন।"
-    elif status == "Approved":
-        text = "👋 **KBKh Science Ecosystem-এ আপনাকে স্বাগতম!**\n\nআপনি একজন এপ্রুভড মেম্বার। প্রোফাইল দেখতে বা অনুরোধ করতে নিচের অপশন ব্যবহার করুন।"
-    elif status == "Pending":
-        text = "⏳ **আপনার রেজিস্ট্রেশন আবেদনটি পেন্ডিং অবস্থায় আছে!**\n\nএডমিন রিভিউ করে অনুমোদন দিলে সব ফিচার নিজে থেকেই আনলক হয়ে যাবে।"
-    else:
-        text = "👋 **KBKh Science Ecosystem-এ আপনাকে স্বাগতম!**\n\nরেজিস্ট্রেশন করতে `📝 Register Now` চাপুন অথবা নিবন্ধিত অ্যাকাউন্ট রিকভার করতে `🔑 Already Registered?` চাপুন।"
-
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=main_menu(tg_id))
-
-# 🔄 Refresh Status Button
-@bot.message_handler(func=lambda msg: msg.text == "🔄 Check Status / Refresh")
-def check_status_refresh(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
+  if res:
+    status = res[0]
     if status == "Approved":
-        bot.send_message(message.chat.id, "🎉 **অভিনন্দন!** আপনার আবেদন অনুমোদন করা হয়েছে। সব অপশন আনলক করা হলো!", parse_mode="Markdown", reply_markup=main_menu(tg_id))
+      await update.message.reply_text(
+          "✅ আপনি ইতিমধ্যেই অনুমোদিত (Approved) সদস্য!"
+      )
     elif status == "Pending":
-        bot.send_message(message.chat.id, "⏳ আপনার আবেদন এখনও পেন্ডিং রয়েছে। এডমিন খুব শীঘ্রই রিভিউ করবেন।", reply_markup=main_menu(tg_id))
-    else:
-        bot.send_message(message.chat.id, "❌ আপনি নিবন্ধিত নন।", reply_markup=main_menu(tg_id))
+      await update.message.reply_text(
+          "⏳ আপনার রেজিস্ট্রেশন আবেদনটি এখনও এডমিন অনুমোদনের অপেক্ষায় আছে।"
+      )
+    elif status == "Blocked":
+      await update.message.reply_text("⛔ আপনাকে ব্লক করা হয়েছে।")
+    return
 
-# ----------------------------------------------------
-# 👤 1. MY PROFILE (Approved Only)
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "👤 My Profile")
-def view_profile(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
+  await update.message.reply_text(
+      f"👋 **KBKh Registration Portal**-এ স্বাগতম, {user.first_name}!\n\n"
+      "রেজিস্ট্রেশন সম্পূর্ণ করতে আপনার **Facebook Name**টি লিখে পাঠান:"
+  )
+  context.user_data["step"] = "FB_NAME"
 
-    if status != "Approved" and status != "ADMIN":
-        bot.send_message(message.chat.id, "❌ আপনার রেজিস্ট্রেশন এপ্রুভড হওয়ার পরেই কেবল প্রোফাইল দেখতে পাবেন!", reply_markup=main_menu(tg_id))
-        return
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  step = context.user_data.get("step")
+  text = update.message.text.strip()
+  user = update.effective_user
+
+  if step == "FB_NAME":
+    context.user_data["fb_name"] = text
+    await update.message.reply_text("ধন্যবাদ! এবার আপনার **পুরো নাম (Full Name)** লিখুন:")
+    context.user_data["step"] = "FULL_NAME"
+
+  elif step == "FULL_NAME":
+    context.user_data["full_name"] = text
+
+    keyboard = [
+        [InlineKeyboardButton("Info Team", callback_data="team_Info Team")],
+        [InlineKeyboardButton("Meme Team", callback_data="team_Meme Team")],
+    ]
+    await update.message.reply_text(
+        "আপনার **টিম (Team)** নির্বাচন করুন:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["step"] = "TEAM"
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  query = update.callback_query
+  await query.answer()
+
+  if query.data.startswith("team_"):
+    team_name = query.data.split("_")[1]
+    user = update.effective_user
+
+    fb_name = context.user_data.get("fb_name", user.first_name)
+    full_name = context.user_data.get("full_name", user.full_name)
+
+    # Neon DB-তে Pending স্ট্যাটাসে সেভ করা
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT fb_name, full_name, unique_id, team_name, status, security_code FROM members WHERE telegram_id = %s", (tg_id,))
-        user = cursor.fetchone()
-        conn.close()
-
-        if user:
-            fb_name, full_name, unique_id, team, u_status, code = user
-            code_display = f"`{code}`" if code else "*(Approved হওয়ার পর পাবেন)*"
-
-            profile_msg = (
-                f"👤 **Your KBKh Profile Summary**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👥 **FB Name:** {fb_name}\n"
-                f"📛 **Full Name:** {full_name}\n"
-                f"🆔 **Unique ID:** {unique_id}\n"
-                f"🌐 **Team:** {team}\n"
-                f"⚡ **Status:** {u_status}\n"
-                f"🔑 **Security Code:** {code_display}\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-            bot.send_message(message.chat.id, profile_msg, parse_mode="Markdown", reply_markup=main_menu(tg_id))
-        else:
-            bot.send_message(message.chat.id, "❌ ডাটা পাওয়া যায়নি!", reply_markup=main_menu(tg_id))
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
-
-# ----------------------------------------------------
-# 🔄 2. CHANGE FB NAME (With Admin Permission)
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "🔄 Change FB Name")
-def change_fb_name_start(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
-
-    if status != "Approved":
-        bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই নাম পরিবর্তন করতে পারবেন।", reply_markup=main_menu(tg_id))
-        return
-
-    msg = bot.send_message(
-        message.chat.id, 
-        "✏️ **Enter your new Facebook Profile Name:**", 
-        parse_mode="Markdown", 
-        reply_markup=cancel_keyboard()
-    )
-    bot.register_next_step_handler(msg, process_fb_name_change)
-
-def process_fb_name_change(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=process_fb_name_change, 
-        retry_msg="✏️ **Enter your new Facebook Profile Name:**", 
-        retry_keyboard=cancel_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    new_fb_name = message.text.strip()
-    tg_id = message.from_user.id
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT fb_name, team_name FROM members WHERE telegram_id = %s", (tg_id,))
-        user = cursor.fetchone()
-
-        if user:
-            old_fb_name, team = user
-            cursor.execute(
-                "INSERT INTO fb_name_requests (telegram_id, old_name, new_name, status) VALUES (%s, %s, %s, 'Pending') RETURNING id",
-                (tg_id, old_fb_name, new_fb_name)
-            )
-            req_id = cursor.fetchone()[0]
-            conn.commit()
-            conn.close()
-
-            bot.send_message(
-                message.chat.id, 
-                f"✅ **আপনার নাম পরিবর্তনের আবেদন এডমিনের কাছে পাঠানো হয়েছে!**\n\n"
-                f"**বর্তমান নাম:** {old_fb_name}\n**নতুন নাম:** {new_fb_name}\n\nএডমিন এটি এপ্রুভ করলে ডাটাবেজে আপডেট হয়ে যাবে।", 
-                parse_mode="Markdown",
-                reply_markup=main_menu(tg_id)
-            )
-
-            if ADMIN_CHAT_ID:
-                admin_markup = InlineKeyboardMarkup()
-                admin_markup.add(
-                    InlineKeyboardButton("✅ Approve", callback_data=f"app_fbreq_{req_id}"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"rej_fbreq_{req_id}")
-                )
-                admin_note = (
-                    f"✏️ **FB Name Change Request!**\n\n"
-                    f"👤 **Old Name:** {old_fb_name}\n"
-                    f"✨ **New Name:** {new_fb_name}\n"
-                    f"🌐 **Team:** {team}\n"
-                    f"🆔 **TG ID:** `{tg_id}`"
-                )
-                bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown", reply_markup=admin_markup)
-        else:
-            conn.close()
-            bot.send_message(message.chat.id, "❌ ডাটা পাওয়া যায়নি!", reply_markup=main_menu(tg_id))
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
-
-# ----------------------------------------------------
-# 🔑 3. ALREADY REGISTERED?
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "🔑 Already Registered?")
-def recovery_start(message):
-    msg = bot.send_message(
-        message.chat.id, 
-        "🔑 **Enter your Security Code:**", 
-        parse_mode="Markdown", 
-        reply_markup=cancel_keyboard()
-    )
-    bot.register_next_step_handler(msg, process_recovery)
-
-def process_recovery(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=process_recovery, 
-        retry_msg="🔑 **Enter your Security Code:**", 
-        retry_keyboard=cancel_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    sec_code = message.text.strip()
-    new_tg_id = message.from_user.id
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT fb_name, full_name, unique_id, team_name FROM members WHERE security_code = %s", (sec_code,))
-        user = cursor.fetchone()
-
-        if user:
-            fb_name, full_name, unique_id, team = user
-            cursor.execute("UPDATE members SET telegram_id = %s WHERE security_code = %s", (new_tg_id, sec_code))
-            conn.commit()
-            conn.close()
-
-            success_msg = (
-                f"🎉 **Account Restored Successfully!**\n\n"
-                f"👤 **FB Name:** {fb_name}\n"
-                f"📛 **Full Name:** {full_name}\n"
-                f"🆔 **Unique ID:** {unique_id}\n"
-                f"🌐 **Team:** {team}\n\n"
-                f"আপনার নতুন Telegram ID ডাটাবেজে যুক্ত করা হয়েছে।"
-            )
-            bot.send_message(message.chat.id, success_msg, parse_mode="Markdown", reply_markup=main_menu(new_tg_id))
-        else:
-            conn.close()
-            bot.send_message(message.chat.id, "❌ ভুল সিকিউরিটি কোড! সঠিক কোড দিয়ে আবার চেষ্টা করুন।", reply_markup=main_menu(new_tg_id))
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(new_tg_id))
-
-# ----------------------------------------------------
-# 🔄 4. REQUEST TEAM CHANGE (With Admin Permission)
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "🔄 Request Team Change")
-def team_change_start(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
-
-    if status != "Approved":
-        bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই টিম পরিবর্তনের অনুরোধ করতে পারবেন।", reply_markup=main_menu(tg_id))
-        return
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT team_name FROM members WHERE telegram_id = %s", (tg_id,))
-        user = cursor.fetchone()
-        conn.close()
-
-        if not user:
-            bot.send_message(message.chat.id, "❌ ডাটা পাওয়া যায়নি!", reply_markup=main_menu(tg_id))
-            return
-
-        user_temp_data[tg_id] = {'old_team': user[0]}
-        msg = bot.send_message(
-            message.chat.id,
-            f"🌐 আপনার বর্তমান টিম: **{user[0]}**\n\nনতুন কোন টিমে যুক্ত হতে চান তা সিলেক্ট করুন:",
-            parse_mode="Markdown",
-            reply_markup=teams_keyboard()
-        )
-        bot.register_next_step_handler(msg, process_team_change_request)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
-
-def process_team_change_request(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=process_team_change_request, 
-        retry_msg="🌐 নতুন কোন টিমে যুক্ত হতে চান তা সিলেক্ট করুন:", 
-        retry_keyboard=teams_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    requested_team = message.text.strip()
-    tg_id = message.from_user.id
-
-    if requested_team not in TEAMS:
-        bot.send_message(message.chat.id, "❌ অবৈধ টিম পছন্দ করা হয়েছে।", reply_markup=main_menu(tg_id))
-        return
-
-    old_team = user_temp_data.get(tg_id, {}).get('old_team', 'Unknown')
-    if requested_team == old_team:
-        bot.send_message(message.chat.id, f"⚠️ আপনি ইতিমধ্যেই **{old_team}**-এ আছেন!", parse_mode="Markdown", reply_markup=main_menu(tg_id))
-        return
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO team_change_requests (telegram_id, old_team, requested_team, status) VALUES (%s, %s, %s, 'Pending') RETURNING id",
-            (tg_id, old_team, requested_team)
-        )
-        req_id = cursor.fetchone()[0]
-        conn.commit()
-
-        cursor.execute("SELECT fb_name FROM members WHERE telegram_id = %s", (tg_id,))
-        fb_name = cursor.fetchone()[0]
-        conn.close()
-
-        bot.send_message(
-            message.chat.id,
-            f"✅ **টিম পরিবর্তনের আবেদন জমা হয়েছে!**\n**{old_team}** ➔ **{requested_team}**\nএডমিন এটি এপ্রুভ করলে আপনার টিম আপডেট হয়ে যাবে।",
-            parse_mode="Markdown",
-            reply_markup=main_menu(tg_id)
-        )
-
-        if ADMIN_CHAT_ID:
-            admin_markup = InlineKeyboardMarkup()
-            admin_markup.add(
-                InlineKeyboardButton("✅ Approve", callback_data=f"app_tmreq_{req_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_tmreq_{req_id}")
-            )
-            admin_note = (
-                f"🔄 **Team Change Request!**\n\n"
-                f"👤 **Member:** {fb_name}\n"
-                f"🌐 **Old Team:** {old_team}\n"
-                f"➡️ **Requested Team:** {requested_team}\n"
-                f"🆔 **TG ID:** `{tg_id}`"
-            )
-            bot.send_message(ADMIN_CHAT_ID, admin_note, parse_mode="Markdown", reply_markup=admin_markup)
-
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
-
-# ----------------------------------------------------
-# 📝 5. NEW REGISTRATION (Unregistered Only)
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "📝 Register Now")
-def reg_start(message):
-    tg_id = message.from_user.id
-    status = get_user_status(tg_id)
-
-    if status == "Pending":
-        bot.send_message(
-            message.chat.id, 
-            "⚠️ আপনার রেজিস্ট্রেশন অনুরোধ ইতিমধ্যেই পেন্ডিং রয়েছে। এডমিন এটি এপ্রুভ করা পর্যন্ত অপেক্ষা করুন।", 
-            reply_markup=main_menu(tg_id)
-        )
-        return
-    elif status == "Approved":
-        bot.send_message(
-            message.chat.id, 
-            "✅ আপনি ইতিমধ্যেই নিবন্ধিত মেম্বার!", 
-            reply_markup=main_menu(tg_id)
-        )
-        return
-
-    user_temp_data[tg_id] = {}
-    msg = bot.send_message(
-        message.chat.id, 
-        "1️⃣ **Enter Your Facebook Profile Name:**", 
-        parse_mode="Markdown", 
-        reply_markup=cancel_keyboard()
-    )
-    bot.register_next_step_handler(msg, reg_get_fullname)
-
-def reg_get_fullname(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=reg_get_fullname, 
-        retry_msg="1️⃣ **Enter Your Facebook Profile Name:**", 
-        retry_keyboard=cancel_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    tg_id = message.from_user.id
-    user_temp_data[tg_id]['fb_name'] = message.text.strip()
-    msg = bot.send_message(
-        message.chat.id, 
-        "2️⃣ **Enter Your Full Name In English:**", 
-        parse_mode="Markdown", 
-        reply_markup=cancel_keyboard()
-    )
-    bot.register_next_step_handler(msg, reg_get_unique_id)
-
-def reg_get_unique_id(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=reg_get_unique_id, 
-        retry_msg="2️⃣ **Enter Your Full Name In English:**", 
-        retry_keyboard=cancel_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    tg_id = message.from_user.id
-    user_temp_data[tg_id]['full_name'] = message.text.strip()
-    msg = bot.send_message(
-        message.chat.id, 
-        "3️⃣ **Enter Your Unique ID (Given by Team):**", 
-        parse_mode="Markdown", 
-        reply_markup=cancel_keyboard()
-    )
-    bot.register_next_step_handler(msg, reg_select_team)
-
-def reg_select_team(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=reg_select_team, 
-        retry_msg="3️⃣ **Enter Your Unique ID (Given by Team):**", 
-        retry_keyboard=cancel_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    tg_id = message.from_user.id
-    user_temp_data[tg_id]['unique_id'] = message.text.strip()
-
-    msg = bot.send_message(
-        message.chat.id, 
-        "4️⃣ **Select Your Team:**", 
-        reply_markup=teams_keyboard()
-    )
-    bot.register_next_step_handler(msg, reg_confirm)
-
-def reg_confirm(message):
-    is_intercepted, reason = check_cancel_or_menu(
-        message, 
-        retry_fn=reg_confirm, 
-        retry_msg="4️⃣ **Select Your Team:**", 
-        retry_keyboard=teams_keyboard()
-    )
-    if is_intercepted:
-        return
-
-    tg_id = message.from_user.id
-    selected_team = message.text.strip()
-
-    if selected_team not in TEAMS:
-        bot.send_message(message.chat.id, "❌ অবৈধ টিম পছন্দ করা হয়েছে। রেজিস্ট্রেশন বাতিল হলো।", reply_markup=main_menu(tg_id))
-        return
-
-    data = user_temp_data.get(tg_id, {})
-    data['team_name'] = selected_team
-    data['user_type'] = "General Member"
-    unique_id = data.get('unique_id', '').strip()
-
-    if selected_team in INFO_TEAMS:
-        cat_teams = INFO_TEAMS
-        cat_name = "Info Team (Alpha/Beta/Gamma)"
-    else:
-        cat_teams = MEME_TEAMS
-        cat_name = "Meme Team (Electron/Proton/Neutron)"
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s)",
-            (unique_id, cat_teams)
-        )
-        exists_count = cursor.fetchone()[0]
-
-        if exists_count > 0:
-            conn.close()
-            bot.send_message(
-                message.chat.id,
-                f"⚠️ **এই Unique ID-টি ({unique_id}) `{cat_name}` ক্যাটাগরিতে ইতিমধ্যেই ব্যবহৃত হয়েছে!**\n\n"
-                f"একই ক্যাটাগরির ভেতরে একাধিক সদস্যের Unique ID এক হতে পারবে না। অনুগ্রহ করে আপনার সঠিক Unique ID প্রদান করুন।",
-                parse_mode="Markdown",
-                reply_markup=main_menu(tg_id)
-            )
-            return
-
-        cursor.execute(
-            "INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')",
-            (tg_id, data.get('fb_name', ''), data.get('full_name', ''), unique_id, data['team_name'], data['user_type'])
-        )
-        conn.commit()
-        conn.close()
-
-        bot.send_message(
-            message.chat.id,
-            "✅ **Registration Request Submitted!**\n\nআপনার আবেদনটি এডমিন পেন্ডিংয়ে রাখা হয়েছে। অনুমোদন পেলে আপনাকে সিকিউরিটি কোড জানিয়ে দেওয়া হবে।",
-            parse_mode="Markdown",
-            reply_markup=main_menu(tg_id)
-        )
-
-        if ADMIN_CHAT_ID:
-            admin_markup = InlineKeyboardMarkup()
-            admin_markup.add(
-                InlineKeyboardButton("✅ Approve", callback_data=f"app_user_{tg_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_user_{tg_id}")
-            )
-            admin_alert = (
-                f"📥 **নতুন রেজিস্ট্রেশন আবেদন!**\n\n"
-                f"👤 **FB Name:** {data.get('fb_name', '')}\n"
-                f"📛 **Full Name:** {data.get('full_name', '')}\n"
-                f"🆔 **Unique ID:** {unique_id}\n"
-                f"🌐 **Team:** {data['team_name']}\n"
-                f"🆔 **TG ID:** `{tg_id}`"
-            )
-            bot.send_message(ADMIN_CHAT_ID, admin_alert, parse_mode="Markdown", reply_markup=admin_markup)
-
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ রেজিস্ট্রেশন ব্যর্থ হয়েছে: {e}", reply_markup=main_menu(tg_id))
-
-# ----------------------------------------------------
-# 👑 6. ADMIN OPTIONS (Pending Permissions & Members List)
-# ----------------------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "⏳ Pending Permissions")
-def admin_pending_permissions_menu(message):
-    if str(message.from_user.id) != str(ADMIN_CHAT_ID):
-        bot.send_message(message.chat.id, "❌ এই অপশনটি শুধুমাত্র মেইন এডমিনের জন্য।")
-        return
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT COUNT(*) FROM members WHERE status = 'Pending'")
-        p_reg = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM fb_name_requests WHERE status = 'Pending'")
-        p_fb = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM team_change_requests WHERE status = 'Pending'")
-        p_tm = cursor.fetchone()[0]
-        conn.close()
-
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(f"📝 New Registrations ({p_reg})", callback_data="perm_list_reg"))
-        markup.add(InlineKeyboardButton(f"✏️ FB Name Changes ({p_fb})", callback_data="perm_list_fb"))
-        markup.add(InlineKeyboardButton(f"🔄 Team Changes ({p_tm})", callback_data="perm_list_tm"))
-
-        bot.send_message(
-            message.chat.id, 
-            "⏳ **Pending Permissions Category:**\n\nযে কোনো পেন্ডিং অনুমোদনের তালিকা দেখতে নিচের বাটনে চাপ দিন:", 
-            parse_mode="Markdown", 
-            reply_markup=markup
-        )
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ এরর: {e}", reply_markup=main_menu(message.from_user.id))
-
-@bot.message_handler(func=lambda msg: msg.text == "📋 Members List")
-def admin_members_list_msg(message):
-    if str(message.from_user.id) != str(ADMIN_CHAT_ID):
-        bot.send_message(message.chat.id, "❌ এই অপশনটি শুধুমাত্র মেইন এডমিনের জন্য।")
-        return
-
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("ℹ️ Info Team", callback_data="cat_info"),
-        InlineKeyboardButton("🎭 Meme Team", callback_data="cat_meme")
-    )
-    bot.send_message(message.chat.id, "📋 **মেম্বার লিস্ট ক্যাটাগরি বেছে নিন:**", parse_mode="Markdown", reply_markup=markup)
-
-# ----------------------------------------------------
-# 🔘 CALLBACK QUERY HANDLER
-# ----------------------------------------------------
-@bot.callback_query_handler(func=lambda call: True)
-def handle_all_callbacks(call):
-    data = call.data
-    tg_id = call.from_user.id
-
-    # Cancel Confirmations
-    if data == "confirm_cancel":
-        user_temp_data.pop(tg_id, None)
-        bot.clear_step_handler_by_chat_id(call.message.chat.id)
-        bot.edit_message_text("❌ প্রসেসটি বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
-        bot.send_message(call.message.chat.id, "প্রধান মেনু:", reply_markup=main_menu(tg_id))
-
-    elif data == "deny_cancel":
-        bot.edit_message_text("▶️ প্রসেসটি পুনরায় চালু রয়েছে।", call.message.chat.id, call.message.message_id)
-        u_info = user_temp_data.get(tg_id, {})
-        retry_fn = u_info.get('retry_fn')
-        retry_msg = u_info.get('retry_msg', 'অনুগ্রহ করে তথ্য লিখুন:')
-        retry_kb = u_info.get('retry_keyboard')
-
-        if retry_fn:
-            msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", reply_markup=retry_kb)
-            bot.register_next_step_handler(msg, retry_fn)
-
-    # ⏳ PENDING PERMISSIONS CATEGORIES
-    elif data == "perm_list_reg":
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT telegram_id, fb_name, unique_id, team_name FROM members WHERE status = 'Pending'")
-        pending_users = cursor.fetchall()
-        conn.close()
-
-        if not pending_users:
-            bot.edit_message_text("✅ কোনো পেন্ডিং রেজিস্ট্রেশন আবেদন নেই।", call.message.chat.id, call.message.message_id)
-            return
-
-        markup = InlineKeyboardMarkup()
-        for u in pending_users:
-            markup.add(InlineKeyboardButton(f"👤 {u['fb_name']} ({u['team_name']})", callback_data=f"pend_user_{u['telegram_id']}"))
-
-        bot.edit_message_text(f"📝 **পেন্ডিং রেজিস্ট্রেশন আবেদন ({len(pending_users)} জন):**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data == "perm_list_fb":
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, old_name, new_name FROM fb_name_requests WHERE status = 'Pending'")
-        reqs = cursor.fetchall()
-        conn.close()
-
-        if not reqs:
-            bot.edit_message_text("✅ কোনো পেন্ডিং ফেসবুক নাম পরিবর্তনের আবেদন নেই।", call.message.chat.id, call.message.message_id)
-            return
-
-        markup = InlineKeyboardMarkup()
-        for r in reqs:
-            markup.add(InlineKeyboardButton(f"✏️ {r['old_name']} ➔ {r['new_name']}", callback_data=f"view_fbreq_{r['id']}"))
-
-        bot.edit_message_text(f"✏️ **পেন্ডিং নাম পরিবর্তনের আবেদন ({len(reqs)} টি):**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data == "perm_list_tm":
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, old_team, requested_team FROM team_change_requests WHERE status = 'Pending'")
-        reqs = cursor.fetchall()
-        conn.close()
-
-        if not reqs:
-            bot.edit_message_text("✅ কোনো পেন্ডিং টিম পরিবর্তনের আবেদন নেই।", call.message.chat.id, call.message.message_id)
-            return
-
-        markup = InlineKeyboardMarkup()
-        for r in reqs:
-            markup.add(InlineKeyboardButton(f"🔄 {r['old_team']} ➔ {r['requested_team']}", callback_data=f"view_tmreq_{r['id']}"))
-
-        bot.edit_message_text(f"🔄 **পেন্ডিং টিম পরিবর্তনের আবেদন ({len(reqs)} টি):**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    # 📝 REGISTRATION APPROVAL
-    elif data.startswith("pend_user_"):
-        target_id = int(data.replace("pend_user_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM members WHERE telegram_id = %s", (target_id,))
-        u = cursor.fetchone()
-        conn.close()
-
-        if u:
-            msg_text = (
-                f"🔍 **Pending Registration Request Details**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👥 **FB Name:** {u['fb_name']}\n"
-                f"📛 **Full Name:** {u['full_name']}\n"
-                f"🆔 **Unique ID:** {u['unique_id']}\n"
-                f"🌐 **Team:** {u['team_name']}\n"
-                f"🆔 **TG ID:** `{u['telegram_id']}`\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-            markup = InlineKeyboardMarkup()
-            markup.add(
-                InlineKeyboardButton("✅ Approve", callback_data=f"app_user_{target_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_user_{target_id}")
-            )
-            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data.startswith("app_user_"):
-        target_id = int(data.replace("app_user_", ""))
-        conn = get_db_connection()
-        code = generate_security_code(conn)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE members SET status = 'Approved', security_code = %s WHERE telegram_id = %s", (code, target_id))
-        conn.commit()
-
-        cursor.execute("SELECT fb_name, team_name FROM members WHERE telegram_id = %s", (target_id,))
-        mem = cursor.fetchone()
-        conn.close()
-
-        bot.edit_message_text(f"✅ **{mem[0]}**-এর আবেদন সফলভাবে এপ্রুভ করা হয়েছে!\n🔑 সিকিউরিটি কোড: `{code}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-
+      conn = get_db_connection()
+      cur = conn.cursor()
+      cur.execute(
+          """
+                INSERT INTO members (telegram_id, fb_name, full_name, team_name, status)
+                VALUES (%s, %s, %s, %s, 'Pending')
+                ON CONFLICT (telegram_id) DO UPDATE 
+                SET fb_name = EXCLUDED.fb_name, full_name = EXCLUDED.full_name, team_name = EXCLUDED.team_name, status = 'Pending';
+            """,
+          (user.id, fb_name, full_name, team_name),
+      )
+      conn.commit()
+      conn.close()
+
+      await query.edit_message_text(
+          "🎉 **রেজিস্ট্রেশন আবেদন সফলভাবে জমা হয়েছে!**\n\n"
+          "এডমিন রিভিউ করে অনুমোদন দিলে আপনি বটের সকল সুবিধা ব্যবহার করতে পারবেন।"
+      )
+
+      # এডমিনকে কন্ট্রোল রুমে দেখার নোটিফিকেশন পাঠানো
+      if ADMIN_ID:
         try:
-            approve_msg = (
-                f"🎉 **রেজিস্ট্রেশন অনুমোদন সফল হয়েছে!**\n\n"
-                f"স্বাগতম **{mem[0]}**!\n"
-                f"🌐 **টিম:** {mem[1]}\n"
-                f"🔑 **আপনার সিকিউরিটি কোড:** `{code}`\n\n"
-                f"⚠️ *এই সিকিউরিটি কোডটি অবশ্যই সেভ করে রাখুন। পরবর্তীতে একাউন্ট রিকভারিতে লাগবে।*"
-            )
-            bot.send_message(target_id, approve_msg, parse_mode="Markdown", reply_markup=main_menu(target_id))
-        except Exception:
-            pass
+          await context.bot.send_message(
+              chat_id=ADMIN_ID,
+              text=(
+                  f"📥 **নতুন রেজিস্ট্রেশন আবেদন!**\n\n"
+                  f"👤 **নাম:** {full_name}\n"
+                  f"🔗 **FB Name:** {fb_name}\n"
+                  f"📌 **টিম:** {team_name}\n\n"
+                  f"কন্ট্রোল রুম বটের `📋 Pending Approvals` অপশনে গিয়ে Approve"
+                  " করতে পারেন।"
+              ),
+          )
+        except Exception as e:
+          logger.error(f"Admin Notify Error: {e}")
 
-    elif data.startswith("rej_user_"):
-        target_id = int(data.replace("rej_user_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM members WHERE telegram_id = %s AND status = 'Pending'", (target_id,))
-        conn.commit()
-        conn.close()
+    except Exception as e:
+      await query.edit_message_text(f"❌ ডাটা সেভ করতে সমস্যা হয়েছে: {e}")
 
-        bot.edit_message_text("❌ রেজিস্ট্রেশন আবেদনটি বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
 
-        try:
-            bot.send_message(target_id, "❌ দুঃখিত, আপনার রেজিস্ট্রেশন আবেদনটি বাতিল করা হয়েছে।", reply_markup=main_menu(target_id))
-        except Exception:
-            pass
+def main():
+  if not BOT_TOKEN:
+    return
+  app = Application.builder().token(BOT_TOKEN).build()
 
-    # ✏️ FB NAME CHANGE APPROVAL
-    elif data.startswith("view_fbreq_"):
-        req_id = int(data.replace("view_fbreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM fb_name_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
-        conn.close()
+  app.add_handler(CommandHandler("start", start))
+  app.add_handler(
+      MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+  )
+  app.add_handler(CallbackQueryHandler(handle_callback))
 
-        if r:
-            msg_text = (
-                f"✏️ **FB Name Change Request**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👤 **Old Name:** {r['old_name']}\n"
-                f"✨ **New Name:** {r['new_name']}\n"
-                f"🆔 **TG ID:** `{r['telegram_id']}`\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-            markup = InlineKeyboardMarkup()
-            markup.add(
-                InlineKeyboardButton("✅ Approve", callback_data=f"app_fbreq_{req_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_fbreq_{req_id}")
-            )
-            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+  logger.info("Registration Bot Running...")
+  app.run_polling(drop_pending_updates=True)
 
-    elif data.startswith("app_fbreq_"):
-        req_id = int(data.replace("app_fbreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT telegram_id, new_name FROM fb_name_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
 
-        if r:
-            cursor.execute("UPDATE members SET fb_name = %s WHERE telegram_id = %s", (r['new_name'], r['telegram_id']))
-            cursor.execute("UPDATE fb_name_requests SET status = 'Approved' WHERE id = %s", (req_id,))
-            conn.commit()
-            conn.close()
-
-            bot.edit_message_text(f"✅ **ফেসবুক নাম সফলভাবে আপডেট করা হয়েছে!**\nনতুন নাম: **{r['new_name']}**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-
-            try:
-                bot.send_message(
-                    r['telegram_id'], 
-                    f"🎉 **আপনার নাম পরিবর্তনের আবেদন অনুমোদিত হয়েছে!**\n\n**নতুন ফেসবুক নাম:** {r['new_name']}", 
-                    parse_mode="Markdown", 
-                    reply_markup=main_menu(r['telegram_id'])
-                )
-            except Exception:
-                pass
-
-    elif data.startswith("rej_fbreq_"):
-        req_id = int(data.replace("rej_fbreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id FROM fb_name_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
-
-        cursor.execute("UPDATE fb_name_requests SET status = 'Rejected' WHERE id = %s", (req_id,))
-        conn.commit()
-        conn.close()
-
-        bot.edit_message_text("❌ ফেসবুক নাম পরিবর্তনের আবেদনটি বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
-
-        if r:
-            try:
-                bot.send_message(r[0], "❌ দুঃখিত, আপনার ফেসবুক নাম পরিবর্তনের আবেদনটি এডমিন অনুমোদন করেননি।", reply_markup=main_menu(r[0]))
-            except Exception:
-                pass
-
-    # 🔄 TEAM CHANGE APPROVAL
-    elif data.startswith("view_tmreq_"):
-        req_id = int(data.replace("view_tmreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM team_change_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
-        conn.close()
-
-        if r:
-            msg_text = (
-                f"🔄 **Team Change Request**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🌐 **Old Team:** {r['old_team']}\n"
-                f"➡️ **New Team:** {r['requested_team']}\n"
-                f"🆔 **TG ID:** `{r['telegram_id']}`\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-            markup = InlineKeyboardMarkup()
-            markup.add(
-                InlineKeyboardButton("✅ Approve", callback_data=f"app_tmreq_{req_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_tmreq_{req_id}")
-            )
-            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data.startswith("app_tmreq_"):
-        req_id = int(data.replace("app_tmreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT telegram_id, requested_team FROM team_change_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
-
-        if r:
-            cursor.execute("UPDATE members SET team_name = %s WHERE telegram_id = %s", (r['requested_team'], r['telegram_id']))
-            cursor.execute("UPDATE team_change_requests SET status = 'Approved' WHERE id = %s", (req_id,))
-            conn.commit()
-            conn.close()
-
-            bot.edit_message_text(f"✅ **টিম পরিবর্তন সফলভাবে আপডেট করা হয়েছে!**\nনতুন টিম: **{r['requested_team']}**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-
-            try:
-                bot.send_message(
-                    r['telegram_id'], 
-                    f"🎉 **আপনার টিম পরিবর্তনের আবেদন অনুমোদিত হয়েছে!**\n\n**নতুন টিম:** {r['requested_team']}", 
-                    parse_mode="Markdown", 
-                    reply_markup=main_menu(r['telegram_id'])
-                )
-            except Exception:
-                pass
-
-    elif data.startswith("rej_tmreq_"):
-        req_id = int(data.replace("rej_tmreq_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id FROM team_change_requests WHERE id = %s", (req_id,))
-        r = cursor.fetchone()
-
-        cursor.execute("UPDATE team_change_requests SET status = 'Rejected' WHERE id = %s", (req_id,))
-        conn.commit()
-        conn.close()
-
-        bot.edit_message_text("❌ টিম পরিবর্তনের আবেদনটি বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
-
-        if r:
-            try:
-                bot.send_message(r[0], "❌ দুঃখিত, আপনার টিম পরিবর্তনের আবেদনটি এডমিন অনুমোদন করেননি।", reply_markup=main_menu(r[0]))
-            except Exception:
-                pass
-
-    # 📋 MEMBERS LIST CATEGORIES & NAVIGATION
-    elif data == "cat_back_main":
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("ℹ️ Info Team", callback_data="cat_info"),
-            InlineKeyboardButton("🎭 Meme Team", callback_data="cat_meme")
-        )
-        bot.edit_message_text("📋 **মেম্বার লিস্ট ক্যাটাগরি বেছে নিন:**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data == "cat_info":
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("Team Alpha", callback_data="team_alpha"),
-            InlineKeyboardButton("Team Beta", callback_data="team_beta"),
-            InlineKeyboardButton("Team Gamma", callback_data="team_gamma")
-        )
-        markup.add(InlineKeyboardButton("🔙 Back", callback_data="cat_back_main"))
-        bot.edit_message_text("ℹ️ **Info Team-এর সাব-টিম বেছে নিন:**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data == "cat_meme":
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("Team Electron", callback_data="team_electron"),
-            InlineKeyboardButton("Team Proton", callback_data="team_proton"),
-            InlineKeyboardButton("Team Neutron", callback_data="team_neutron")
-        )
-        markup.add(InlineKeyboardButton("🔙 Back", callback_data="cat_back_main"))
-        bot.edit_message_text("🎭 **Meme Team-এর সাব-টিম বেছে নিন:**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data.startswith("team_"):
-        slug = data.replace("team_", "")
-        if slug in TEAM_SLUGS:
-            team_name = TEAM_SLUGS[slug]
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("SELECT telegram_id, fb_name, full_name, unique_id FROM members WHERE team_name = %s AND status = 'Approved'", (team_name,))
-            members = cursor.fetchall()
-            conn.close()
-
-            parent_cat = "cat_info" if slug in ["alpha", "beta", "gamma"] else "cat_meme"
-
-            if not members:
-                markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton("🔙 Back", callback_data=parent_cat))
-                bot.edit_message_text(f"🌐 **{team_name}**-এ কোনো এপ্রুভড মেম্বার নেই।", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-                return
-
-            markup = InlineKeyboardMarkup()
-            for m in members:
-                markup.add(InlineKeyboardButton(f"👤 {m['fb_name']} ({m['unique_id']})", callback_data=f"mem_detail_{m['telegram_id']}"))
-
-            markup.add(InlineKeyboardButton("🔙 Back", callback_data=parent_cat))
-            bot.edit_message_text(f"🌐 **{team_name}**-এর মেম্বারদের তালিকা ({len(members)} জন):\nকাঙ্ক্ষিত মেম্বারের বিস্তারিত দেখতে নামে ক্লিক করুন:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-    elif data.startswith("mem_detail_"):
-        target_id = int(data.replace("mem_detail_", ""))
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM members WHERE telegram_id = %s", (target_id,))
-        u = cursor.fetchone()
-        conn.close()
-
-        if u:
-            tg_username = "N/A"
-            try:
-                tg_user = bot.get_chat(target_id)
-                if tg_user.username:
-                    tg_username = f"@{tg_user.username}"
-            except Exception:
-                pass
-
-            reg_date = u['created_at'].strftime("%Y-%m-%d %H:%M") if u.get('created_at') else "N/A"
-
-            msg_text = (
-                f"📄 **Member Full Details**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👥 **FB Name:** {u['fb_name']}\n"
-                f"📛 **Full Name:** {u['full_name']}\n"
-                f"🆔 **Unique ID:** {u['unique_id']}\n"
-                f"🌐 **Team:** {u['team_name']}\n"
-                f"🆔 **TG ID:** `{u['telegram_id']}` ({tg_username})\n"
-                f"🔑 **Security Code:** `{u['security_code']}`\n"
-                f"📅 **Registration Date:** {reg_date}\n"
-                f"⚡ **Status:** {u['status']}\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-
-            markup = InlineKeyboardMarkup()
-            team_slug = [k for k, v in TEAM_SLUGS.items() if v == u['team_name']]
-            back_target = f"team_{team_slug[0]}" if team_slug else "cat_back_main"
-            markup.add(InlineKeyboardButton("🔙 Back to Team List", callback_data=back_target))
-
-            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-# ----------------------------------------------------
-# 🚀 BOT & SERVER LAUNCH
-# ----------------------------------------------------
 if __name__ == "__main__":
-    t = threading.Thread(target=run_flask)
-    t.start()
-    print("🤖 KBKh Registration Bot is Running...")
-    bot.infinity_polling()
+  main()
