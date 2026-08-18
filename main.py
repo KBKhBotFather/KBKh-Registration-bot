@@ -669,7 +669,7 @@ def handle_all_callbacks(call):
         retry_kb = u_info.get('retry_keyboard')
 
         if retry_fn:
-            msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", retry_kb)
+            msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", reply_markup=retry_kb)
             bot.register_next_step_handler(msg, retry_fn)
 
     # 📝 Show Registration Detail
