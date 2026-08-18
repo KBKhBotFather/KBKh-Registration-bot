@@ -6,10 +6,10 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask
 
-# ⚙️ Environment Variables
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-DB_URI = os.environ.get("DB_URI", "").strip()
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
+# ⚙️ Environment Variables (Render এর সব ধরণের কী নেম গ্রহণ করবে)
+BOT_TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TOKEN") or "").strip()
+DB_URI = (os.environ.get("DB_URI") or os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URI") or "").strip()
+ADMIN_CHAT_ID = (os.environ.get("ADMIN_CHAT_ID") or os.environ.get("ADMIN_ID") or "").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
