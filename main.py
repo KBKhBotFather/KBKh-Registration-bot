@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask
 
-# ⚙️ Environment Variables (Render এর সব ধরণের কী নেম গ্রহণ করবে)
+# ⚙️ Environment Variables (Render-এর সব ধরনের কী নেম গ্রহণ করবে)
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TOKEN") or "").strip()
 DB_URI = (os.environ.get("DB_URI") or os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URI") or "").strip()
 ADMIN_CHAT_ID = (os.environ.get("ADMIN_CHAT_ID") or os.environ.get("ADMIN_ID") or "").strip()
@@ -42,7 +42,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS members (
                 id SERIAL PRIMARY KEY,
-                telegram_id BIGINT,
+                telegram_id BIGINT UNIQUE,
                 fb_name TEXT,
                 full_name TEXT,
                 unique_id TEXT,
@@ -330,7 +330,7 @@ def view_profile(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
 
-# 🔄 3. CHANGE FB NAME
+# 🔄 3. CHANGE FB NAME (Spam Protected)
 @bot.message_handler(func=lambda msg: msg.text == "🔄 Change FB Name")
 def change_fb_name_start(message):
     tg_id = message.from_user.id
@@ -339,6 +339,20 @@ def change_fb_name_start(message):
     if status != "Approved":
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই নাম পরিবর্তন করতে পারবেন।", reply_markup=main_menu(tg_id))
         return
+
+    # 🚫 Check for existing Pending Request
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM fb_name_requests WHERE telegram_id = %s AND status = 'Pending'", (tg_id,))
+        pending_req = cursor.fetchone()
+        conn.close()
+
+        if pending_req:
+            bot.send_message(message.chat.id, "⚠️ **আপনার একটি ফেসবুক নাম পরিবর্তনের আবেদন ইতিমধ্যেই পেন্ডিং রয়েছে!**\nএডমিন সেটি প্রসেস না করা পর্যন্ত পুনরায় আবেদন করা যাবে না।", parse_mode="Markdown", reply_markup=main_menu(tg_id))
+            return
+    except Exception as e:
+        print(f"Check Pending FB Name Error: {e}")
 
     msg = bot.send_message(message.chat.id, "✏️ **Enter your new Facebook Profile Name:**", parse_mode="Markdown", reply_markup=cancel_keyboard())
     bot.register_next_step_handler(msg, process_fb_name_change)
@@ -414,7 +428,7 @@ def process_recovery(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(new_tg_id))
 
-# 🔄 5. REQUEST TEAM CHANGE
+# 🔄 5. REQUEST TEAM CHANGE (Spam Protected)
 @bot.message_handler(func=lambda msg: msg.text == "🔄 Request Team Change")
 def team_change_start(message):
     tg_id = message.from_user.id
@@ -424,9 +438,18 @@ def team_change_start(message):
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই টিম পরিবর্তনের অনুরোধ করতে পারবেন।", reply_markup=main_menu(tg_id))
         return
 
+    # 🚫 Check for existing Pending Request
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        cursor.execute("SELECT id FROM team_change_requests WHERE telegram_id = %s AND status = 'Pending'", (tg_id,))
+        pending_req = cursor.fetchone()
+
+        if pending_req:
+            conn.close()
+            bot.send_message(message.chat.id, "⚠️ **আপনার একটি টিম পরিবর্তনের আবেদন ইতিমধ্যেই পেন্ডিং রয়েছে!**\nএডমিন সেটি প্রসেস না করা পর্যন্ত পুনরায় আবেদন করা যাবে না।", parse_mode="Markdown", reply_markup=main_menu(tg_id))
+            return
+
         cursor.execute("SELECT team_name FROM members WHERE telegram_id = %s", (tg_id,))
         user = cursor.fetchone()
         conn.close()
@@ -592,9 +615,14 @@ def admin_members_list_msg(message):
     )
     bot.send_message(message.chat.id, "📋 **মেম্বার লিস্ট ক্যাটাগরি বেছে নিন:**", parse_mode="Markdown", reply_markup=markup)
 
-# 🔘 CALLBACK QUERY HANDLER
+# 🔘 CALLBACK QUERY HANDLER (Fixed Freeze & Missing Handlers)
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
     data = call.data
     tg_id = call.from_user.id
 
@@ -644,12 +672,13 @@ def handle_all_callbacks(call):
         mem = cursor.fetchone()
         conn.close()
 
-        bot.edit_message_text(f"✅ **{mem[0]}**-এর আবেদন সফলভাবে এপ্রুভ করা হয়েছে!\n🔑 সিকিউরিটি কোড: `{code}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        if mem:
+            bot.edit_message_text(f"✅ **{mem[0]}**-এর আবেদন সফলভাবে এপ্রুভ করা হয়েছে!\n🔑 সিকিউরিটি কোড: `{code}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-        try:
-            bot.send_message(target_id, f"🎉 **রেজিস্ট্রেশন অনুমোদন সফল হয়েছে!**\n\nস্বাগতম **{mem[0]}**!\n🌐 **টিম:** {mem[1]}\n🔑 **আপনার সিকিউরিটি কোড:** `{code}`", parse_mode="Markdown", reply_markup=main_menu(target_id))
-        except Exception:
-            pass
+            try:
+                bot.send_message(target_id, f"🎉 **রেজিস্ট্রেশন অনুমোদন সফল হয়েছে!**\n\nস্বাগতম **{mem[0]}**!\n🌐 **টিম:** {mem[1]}\n🔑 **আপনার সিকিউরিটি কোড:** `{code}`", parse_mode="Markdown", reply_markup=main_menu(target_id))
+            except Exception:
+                pass
 
     elif data.startswith("rej_user_"):
         target_id = int(data.replace("rej_user_", ""))
@@ -665,6 +694,86 @@ def handle_all_callbacks(call):
             bot.send_message(target_id, "❌ দুঃখিত, আপনার রেজিস্ট্রেশন আবেদনটি বাতিল করা হয়েছে।", reply_markup=main_menu(target_id))
         except Exception:
             pass
+
+    # ✏️ FB Name Change Request Approve/Reject Handlers
+    elif data.startswith("app_fbreq_"):
+        req_id = int(data.replace("app_fbreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id, new_name FROM fb_name_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+        if req:
+            u_tg_id, new_name = req
+            cursor.execute("UPDATE members SET fb_name = %s WHERE telegram_id = %s", (new_name, u_tg_id))
+            cursor.execute("UPDATE fb_name_requests SET status = 'Approved' WHERE id = %s", (req_id,))
+            conn.commit()
+            bot.edit_message_text(f"✅ FB নাম পরিবর্তন এপ্রুভড! (নতুন নাম: **{new_name}**)", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            try:
+                bot.send_message(u_tg_id, f"🎉 আপনার FB নাম পরিবর্তনের আবেদন অনুমোদিত হয়েছে!\n**নতুন নাম:** {new_name}", parse_mode="Markdown", reply_markup=main_menu(u_tg_id))
+            except Exception:
+                pass
+        else:
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+        conn.close()
+
+    elif data.startswith("rej_fbreq_"):
+        req_id = int(data.replace("rej_fbreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id FROM fb_name_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+        if req:
+            u_tg_id = req[0]
+            cursor.execute("UPDATE fb_name_requests SET status = 'Rejected' WHERE id = %s", (req_id,))
+            conn.commit()
+            bot.edit_message_text("❌ FB নাম পরিবর্তনের আবেদন বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
+            try:
+                bot.send_message(u_tg_id, "❌ আপনার FB নাম পরিবর্তনের আবেদনটি বাতিল করা হয়েছে।", reply_markup=main_menu(u_tg_id))
+            except Exception:
+                pass
+        else:
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+        conn.close()
+
+    # 🔄 Team Change Request Approve/Reject Handlers
+    elif data.startswith("app_tmreq_"):
+        req_id = int(data.replace("app_tmreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id, requested_team FROM team_change_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+        if req:
+            u_tg_id, new_team = req
+            cursor.execute("UPDATE members SET team_name = %s WHERE telegram_id = %s", (new_team, u_tg_id))
+            cursor.execute("UPDATE team_change_requests SET status = 'Approved' WHERE id = %s", (req_id,))
+            conn.commit()
+            bot.edit_message_text(f"✅ টিম পরিবর্তন এপ্রুভড! (নতুন টিম: **{new_team}**)", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            try:
+                bot.send_message(u_tg_id, f"🎉 আপনার টিম পরিবর্তনের আবেদন অনুমোদিত হয়েছে!\n**নতুন টিম:** {new_team}", parse_mode="Markdown", reply_markup=main_menu(u_tg_id))
+            except Exception:
+                pass
+        else:
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+        conn.close()
+
+    elif data.startswith("rej_tmreq_"):
+        req_id = int(data.replace("rej_tmreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id FROM team_change_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+        if req:
+            u_tg_id = req[0]
+            cursor.execute("UPDATE team_change_requests SET status = 'Rejected' WHERE id = %s", (req_id,))
+            conn.commit()
+            bot.edit_message_text("❌ টিম পরিবর্তনের আবেদন বাতিল করা হয়েছে।", call.message.chat.id, call.message.message_id)
+            try:
+                bot.send_message(u_tg_id, "❌ আপনার টিম পরিবর্তনের আবেদনটি বাতিল করা হয়েছে।", reply_markup=main_menu(u_tg_id))
+            except Exception:
+                pass
+        else:
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+        conn.close()
 
     elif data == "cat_back_main":
         markup = InlineKeyboardMarkup()
