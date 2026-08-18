@@ -32,7 +32,7 @@ def get_db_connection():
         uri = uri.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(uri)
 
-# 🛠️ Auto DB Tables Setup
+# 🛠️ Auto DB Tables Setup (Connected with Central Control Room)
 def init_db():
     try:
         conn = get_db_connection()
@@ -50,8 +50,13 @@ def init_db():
                 user_type TEXT,
                 status TEXT DEFAULT 'Pending',
                 security_code TEXT,
+                is_blocked BOOLEAN DEFAULT FALSE,
+                is_removed BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS is_removed BOOLEAN DEFAULT FALSE;
 
             CREATE TABLE IF NOT EXISTS fb_name_requests (
                 id SERIAL PRIMARY KEY,
@@ -107,18 +112,21 @@ def generate_security_code(conn):
         cnt = cursor.fetchone()[0] + 1
         return f"KBKh2022{cnt}"
 
-# 🔍 User Status Checker
+# 🔍 User Status Checker (Central Control Room Sync Enabled)
 def get_user_status(tg_id):
     if ADMIN_CHAT_ID and str(tg_id).strip() == str(ADMIN_CHAT_ID).strip():
         return "ADMIN"
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT status FROM members WHERE telegram_id = %s", (tg_id,))
+        cursor.execute("SELECT status, is_blocked FROM members WHERE telegram_id = %s", (tg_id,))
         res = cursor.fetchone()
         conn.close()
         if res:
-            return res[0]
+            status, is_blocked = res[0], res[1]
+            if is_blocked or status == "Blocked":
+                return "Blocked"
+            return status
         return "UNREGISTERED"
     except Exception as e:
         print(f"DB Error: {e}")
@@ -661,7 +669,7 @@ def handle_all_callbacks(call):
         retry_kb = u_info.get('retry_keyboard')
 
         if retry_fn:
-            msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", reply_markup=retry_kb)
+            msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", retry_kb)
             bot.register_next_step_handler(msg, retry_fn)
 
     # 📝 Show Registration Detail
