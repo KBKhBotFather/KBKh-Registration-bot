@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask
 
-# ⚙️ Environment Variables (Render-এর সব ধরনের কী নেম গ্রহণ করবে)
+# ⚙️ Environment Variables
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TOKEN") or "").strip()
 DB_URI = (os.environ.get("DB_URI") or os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URI") or "").strip()
 ADMIN_CHAT_ID = (os.environ.get("ADMIN_CHAT_ID") or os.environ.get("ADMIN_ID") or "").strip()
@@ -260,7 +260,7 @@ def check_status_refresh(message):
     else:
         bot.send_message(message.chat.id, "❌ আপনি নিবন্ধিত নন।", reply_markup=main_menu(tg_id))
 
-# 👑 1. ADMIN PENDING APPLICATIONS
+# 👑 1. ADMIN ALL PENDING APPLICATIONS (REGISTRATION + NAME CHANGE + TEAM CHANGE)
 @bot.message_handler(func=lambda msg: msg.text == "⏳ Pending Applications")
 def admin_pending_applications(message):
     tg_id = message.from_user.id
@@ -271,21 +271,44 @@ def admin_pending_applications(message):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. New Registrations
         cursor.execute("SELECT telegram_id, fb_name, unique_id, team_name FROM members WHERE status = 'Pending'")
-        pending_users = cursor.fetchall()
+        pending_regs = cursor.fetchall()
+
+        # 2. FB Name Changes
+        cursor.execute("SELECT id, telegram_id, old_name, new_name FROM fb_name_requests WHERE status = 'Pending'")
+        pending_fb = cursor.fetchall()
+
+        # 3. Team Changes
+        cursor.execute("SELECT id, telegram_id, old_team, requested_team FROM team_change_requests WHERE status = 'Pending'")
+        pending_team = cursor.fetchall()
+
         conn.close()
 
-        if not pending_users:
-            bot.send_message(message.chat.id, "✅ কোনো পেন্ডিং রেজিস্ট্রেশন আবেদন নেই।", reply_markup=main_menu(tg_id))
+        total = len(pending_regs) + len(pending_fb) + len(pending_team)
+
+        if total == 0:
+            bot.send_message(message.chat.id, "✅ কোনো পেন্ডিং আবেদন নেই।", reply_markup=main_menu(tg_id))
             return
 
         markup = InlineKeyboardMarkup()
-        for u in pending_users:
-            markup.add(InlineKeyboardButton(f"👤 {u['fb_name']} ({u['team_name']})", callback_data=f"pend_user_{u['telegram_id']}"))
+
+        if pending_regs:
+            for u in pending_regs:
+                markup.add(InlineKeyboardButton(f"📝 Reg: {u['fb_name']} ({u['team_name']})", callback_data=f"pend_user_{u['telegram_id']}"))
+
+        if pending_fb:
+            for f in pending_fb:
+                markup.add(InlineKeyboardButton(f"✏️ Name: {f['old_name']} ➔ {f['new_name']}", callback_data=f"show_fbreq_{f['id']}"))
+
+        if pending_team:
+            for t in pending_team:
+                markup.add(InlineKeyboardButton(f"🔄 Team: {t['old_team']} ➔ {t['requested_team']}", callback_data=f"show_tmreq_{t['id']}"))
 
         bot.send_message(
             message.chat.id, 
-            f"📝 **পেন্ডিং রেজিস্ট্রেশন আবেদন ({len(pending_users)} জন):**\nনিচে ক্লিক করে এপ্রুভ বা রিজেক্ট করুন:", 
+            f"📝 **সকল পেন্ডিং আবেদন ({total} টি):**\nনিচে ক্লিক করে এপ্রুভ বা রিজেক্ট করুন:", 
             parse_mode="Markdown", 
             reply_markup=markup
         )
@@ -336,11 +359,10 @@ def change_fb_name_start(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
 
-    if status != "Approved":
+    if status != "Approved" and status != "ADMIN":
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই নাম পরিবর্তন করতে পারবেন।", reply_markup=main_menu(tg_id))
         return
 
-    # 🚫 Check for existing Pending Request
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -434,11 +456,10 @@ def team_change_start(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
 
-    if status != "Approved":
+    if status != "Approved" and status != "ADMIN":
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই টিম পরিবর্তনের অনুরোধ করতে পারবেন।", reply_markup=main_menu(tg_id))
         return
 
-    # 🚫 Check for existing Pending Request
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -615,7 +636,7 @@ def admin_members_list_msg(message):
     )
     bot.send_message(message.chat.id, "📋 **মেম্বার লিস্ট ক্যাটাগরি বেছে নিন:**", parse_mode="Markdown", reply_markup=markup)
 
-# 🔘 CALLBACK QUERY HANDLER (Fixed Freeze & Missing Handlers)
+# 🔘 CALLBACK QUERY HANDLER
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
     try:
@@ -643,6 +664,7 @@ def handle_all_callbacks(call):
             msg = bot.send_message(call.message.chat.id, retry_msg, parse_mode="Markdown", reply_markup=retry_kb)
             bot.register_next_step_handler(msg, retry_fn)
 
+    # 📝 Show Registration Detail
     elif data.startswith("pend_user_"):
         target_id = int(data.replace("pend_user_", ""))
         conn = get_db_connection()
@@ -660,6 +682,57 @@ def handle_all_callbacks(call):
             )
             bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
+    # ✏️ Show FB Name Request Detail
+    elif data.startswith("show_fbreq_"):
+        req_id = int(data.replace("show_fbreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM fb_name_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+
+        if req:
+            cursor.execute("SELECT team_name FROM members WHERE telegram_id = %s", (req['telegram_id'],))
+            m = cursor.fetchone()
+            team = m['team_name'] if m else "Unknown"
+            conn.close()
+
+            msg_text = f"✏️ **Pending FB Name Change Request**\n━━━━━━━━━━━━━━━━━━\n👤 **Old Name:** {req['old_name']}\n✨ **New Name:** {req['new_name']}\n🌐 **Team:** {team}\n🆔 **TG ID:** `{req['telegram_id']}`\n━━━━━━━━━━━━━━━━━━"
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("✅ Approve", callback_data=f"app_fbreq_{req_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"rej_fbreq_{req_id}")
+            )
+            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        else:
+            conn.close()
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+
+    # 🔄 Show Team Request Detail
+    elif data.startswith("show_tmreq_"):
+        req_id = int(data.replace("show_tmreq_", ""))
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM team_change_requests WHERE id = %s AND status = 'Pending'", (req_id,))
+        req = cursor.fetchone()
+
+        if req:
+            cursor.execute("SELECT fb_name FROM members WHERE telegram_id = %s", (req['telegram_id'],))
+            m = cursor.fetchone()
+            fb_name = m['fb_name'] if m else "Unknown"
+            conn.close()
+
+            msg_text = f"🔄 **Pending Team Change Request**\n━━━━━━━━━━━━━━━━━━\n👤 **Member:** {fb_name}\n🌐 **Old Team:** {req['old_team']}\n➡️ **Requested Team:** {req['requested_team']}\n🆔 **TG ID:** `{req['telegram_id']}`\n━━━━━━━━━━━━━━━━━━"
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("✅ Approve", callback_data=f"app_tmreq_{req_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"rej_tmreq_{req_id}")
+            )
+            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        else:
+            conn.close()
+            bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
+
+    # ✅ Approve New User
     elif data.startswith("app_user_"):
         target_id = int(data.replace("app_user_", ""))
         conn = get_db_connection()
@@ -680,6 +753,7 @@ def handle_all_callbacks(call):
             except Exception:
                 pass
 
+    # ❌ Reject New User
     elif data.startswith("rej_user_"):
         target_id = int(data.replace("rej_user_", ""))
         conn = get_db_connection()
@@ -695,7 +769,7 @@ def handle_all_callbacks(call):
         except Exception:
             pass
 
-    # ✏️ FB Name Change Request Approve/Reject Handlers
+    # ✏️ Approve FB Name Request
     elif data.startswith("app_fbreq_"):
         req_id = int(data.replace("app_fbreq_", ""))
         conn = get_db_connection()
@@ -716,6 +790,7 @@ def handle_all_callbacks(call):
             bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
         conn.close()
 
+    # ✏️ Reject FB Name Request
     elif data.startswith("rej_fbreq_"):
         req_id = int(data.replace("rej_fbreq_", ""))
         conn = get_db_connection()
@@ -735,7 +810,7 @@ def handle_all_callbacks(call):
             bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
         conn.close()
 
-    # 🔄 Team Change Request Approve/Reject Handlers
+    # 🔄 Approve Team Change
     elif data.startswith("app_tmreq_"):
         req_id = int(data.replace("app_tmreq_", ""))
         conn = get_db_connection()
@@ -756,6 +831,7 @@ def handle_all_callbacks(call):
             bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
         conn.close()
 
+    # 🔄 Reject Team Change
     elif data.startswith("rej_tmreq_"):
         req_id = int(data.replace("rej_tmreq_", ""))
         conn = get_db_connection()
@@ -775,6 +851,7 @@ def handle_all_callbacks(call):
             bot.edit_message_text("⚠️ এই আবেদনটি ইতিমধ্যেই প্রসেস করা হয়েছে।", call.message.chat.id, call.message.message_id)
         conn.close()
 
+    # 📋 Members Navigation
     elif data == "cat_back_main":
         markup = InlineKeyboardMarkup()
         markup.add(
