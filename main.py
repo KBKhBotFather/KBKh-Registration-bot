@@ -119,13 +119,15 @@ def get_user_status(tg_id):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT status, is_blocked FROM members WHERE telegram_id = %s", (tg_id,))
+        cursor.execute("SELECT status, is_blocked, is_removed FROM members WHERE telegram_id = %s", (tg_id,))
         res = cursor.fetchone()
         conn.close()
         if res:
-            status, is_blocked = res[0], res[1]
+            status, is_blocked, is_removed = res[0], res[1], res[2]
             if is_blocked or status == "Blocked":
                 return "Blocked"
+            if is_removed or status == "Removed":
+                return "UNREGISTERED"
             return status
         return "UNREGISTERED"
     except Exception as e:
@@ -184,6 +186,11 @@ def check_cancel_or_menu(message, retry_fn, retry_msg, retry_keyboard=None):
     text = message.text.strip() if message.text else ""
     tg_id = message.from_user.id
 
+    if get_user_status(tg_id) == "Blocked":
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return True, "blocked"
+
     if text in ["❌ Cancel", "/cancel"]:
         user_temp_data[tg_id] = user_temp_data.get(tg_id, {})
         user_temp_data[tg_id]['retry_fn'] = retry_fn
@@ -217,6 +224,12 @@ def check_cancel_or_menu(message, retry_fn, retry_msg, retry_keyboard=None):
     return False, None
 
 def handle_menu_action(message, action):
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) == "Blocked":
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     if action == "📝 Register Now":
         reg_start(message)
     elif action == "🔄 Change FB Name":
@@ -243,7 +256,7 @@ def send_welcome(message):
     status = get_user_status(tg_id)
 
     if status == "Blocked":
-        bot.send_message(message.chat.id, "❌ **আপনাকে সিস্টেম থেকে ব্লক করা হয়েছে!**")
+        bot.send_message(message.chat.id, "Access Blocked⛔")
         return
     elif status == "ADMIN":
         text = "👑 **Admin Panel-এ আপনাকে স্বাগতম!**\n\nপেন্ডিং আবেদন বা মেম্বারদের তালিকা দেখতে নিচের অপশনগুলো ব্যবহার করুন।"
@@ -261,6 +274,11 @@ def send_welcome(message):
 def check_status_refresh(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
+
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     if status == "Approved":
         bot.send_message(message.chat.id, "🎉 **অভিনন্দন!** আপনার আবেদন অনুমোদন করা হয়েছে।", parse_mode="Markdown", reply_markup=main_menu(tg_id))
     elif status == "Pending":
@@ -268,10 +286,14 @@ def check_status_refresh(message):
     else:
         bot.send_message(message.chat.id, "❌ আপনি নিবন্ধিত নন।", reply_markup=main_menu(tg_id))
 
-# 👑 1. ADMIN ALL PENDING APPLICATIONS (REGISTRATION + NAME CHANGE + TEAM CHANGE)
+# 👑 1. ADMIN ALL PENDING APPLICATIONS
 @bot.message_handler(func=lambda msg: msg.text == "⏳ Pending Applications")
 def admin_pending_applications(message):
     tg_id = message.from_user.id
+    if get_user_status(tg_id) == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     if str(tg_id).strip() != str(ADMIN_CHAT_ID).strip():
         bot.send_message(message.chat.id, "❌ এই অপশনটি শুধুমাত্র এডমিনের জন্য।")
         return
@@ -280,15 +302,12 @@ def admin_pending_applications(message):
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. New Registrations
-        cursor.execute("SELECT telegram_id, fb_name, unique_id, team_name FROM members WHERE status = 'Pending'")
+        cursor.execute("SELECT telegram_id, fb_name, unique_id, team_name FROM members WHERE status = 'Pending' AND is_blocked = FALSE AND is_removed = FALSE")
         pending_regs = cursor.fetchall()
 
-        # 2. FB Name Changes
         cursor.execute("SELECT id, telegram_id, old_name, new_name FROM fb_name_requests WHERE status = 'Pending'")
         pending_fb = cursor.fetchall()
 
-        # 3. Team Changes
         cursor.execute("SELECT id, telegram_id, old_team, requested_team FROM team_change_requests WHERE status = 'Pending'")
         pending_team = cursor.fetchall()
 
@@ -329,6 +348,10 @@ def view_profile(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
 
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     if status != "Approved" and status != "ADMIN":
         bot.send_message(message.chat.id, "❌ আপনার রেজিস্ট্রেশন এপ্রুভড হওয়ার পরই কেবল প্রোফাইল দেখতে পাবেন!", reply_markup=main_menu(tg_id))
         return
@@ -361,11 +384,15 @@ def view_profile(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ ডাটাবেজ ত্রুটি: {e}", reply_markup=main_menu(tg_id))
 
-# 🔄 3. CHANGE FB NAME (Spam Protected)
+# 🔄 3. CHANGE FB NAME
 @bot.message_handler(func=lambda msg: msg.text == "🔄 Change FB Name")
 def change_fb_name_start(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
+
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
 
     if status != "Approved" and status != "ADMIN":
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই নাম পরিবর্তন করতে পারবেন।", reply_markup=main_menu(tg_id))
@@ -427,6 +454,13 @@ def process_fb_name_change(message):
 # 🔑 4. ALREADY REGISTERED?
 @bot.message_handler(func=lambda msg: msg.text == "🔑 Already Registered?")
 def recovery_start(message):
+    tg_id = message.from_user.id
+    status = get_user_status(tg_id)
+
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     msg = bot.send_message(message.chat.id, "🔑 **Enter your Security Code:**", parse_mode="Markdown", reply_markup=cancel_keyboard())
     bot.register_next_step_handler(msg, process_recovery)
 
@@ -441,11 +475,12 @@ def process_recovery(message):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT fb_name, full_name, unique_id, team_name FROM members WHERE security_code = %s", (sec_code,))
+        cursor.execute("SELECT fb_name, full_name, unique_id, team_name FROM members WHERE security_code = %s AND is_blocked = FALSE AND is_removed = FALSE", (sec_code,))
         user = cursor.fetchone()
 
         if user:
             fb_name, full_name, unique_id, team = user
+            cursor.execute("DELETE FROM members WHERE telegram_id = %s AND security_code != %s", (new_tg_id, sec_code))
             cursor.execute("UPDATE members SET telegram_id = %s WHERE security_code = %s", (new_tg_id, sec_code))
             conn.commit()
             conn.close()
@@ -458,11 +493,15 @@ def process_recovery(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ ত্রুটি: {e}", reply_markup=main_menu(new_tg_id))
 
-# 🔄 5. REQUEST TEAM CHANGE (Spam Protected)
+# 🔄 5. REQUEST TEAM CHANGE
 @bot.message_handler(func=lambda msg: msg.text == "🔄 Request Team Change")
 def team_change_start(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
+
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
 
     if status != "Approved" and status != "ADMIN":
         bot.send_message(message.chat.id, "❌ আপনার আবেদন এপ্রুভড হওয়ার পরই টিম পরিবর্তনের অনুরোধ করতে পারবেন।", reply_markup=main_menu(tg_id))
@@ -540,6 +579,10 @@ def reg_start(message):
     tg_id = message.from_user.id
     status = get_user_status(tg_id)
 
+    if status == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
     if status == "Pending":
         bot.send_message(message.chat.id, "⚠️ আপনার রেজিস্ট্রেশন অনুরোধ ইতিমধ্যেই পেন্ডিং রয়েছে।", reply_markup=main_menu(tg_id))
         return
@@ -605,7 +648,7 @@ def reg_confirm(message):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s)", (unique_id, cat_teams))
+        cursor.execute("SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s) AND is_removed = FALSE AND status != 'Removed'", (unique_id, cat_teams))
         exists_count = cursor.fetchone()[0]
 
         if exists_count > 0:
@@ -613,7 +656,11 @@ def reg_confirm(message):
             bot.send_message(message.chat.id, f"⚠️ **এই Unique ID-টি ({unique_id}) `{cat_name}` ক্যাটাগরিতে ইতিমধ্যেই ব্যবহৃত হয়েছে!**", parse_mode="Markdown", reply_markup=main_menu(tg_id))
             return
 
-        cursor.execute("INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')", (tg_id, data.get('fb_name', ''), data.get('full_name', ''), unique_id, data['team_name'], data['user_type']))
+        cursor.execute("DELETE FROM members WHERE telegram_id = %s", (tg_id,))
+        cursor.execute("DELETE FROM fb_name_requests WHERE telegram_id = %s", (tg_id,))
+        cursor.execute("DELETE FROM team_change_requests WHERE telegram_id = %s", (tg_id,))
+
+        cursor.execute("INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status, is_blocked, is_removed) VALUES (%s, %s, %s, %s, %s, %s, 'Pending', FALSE, FALSE)", (tg_id, data.get('fb_name', ''), data.get('full_name', ''), unique_id, data['team_name'], data['user_type']))
         conn.commit()
         conn.close()
 
@@ -633,7 +680,12 @@ def reg_confirm(message):
 # 📋 7. MEMBERS LIST
 @bot.message_handler(func=lambda msg: msg.text == "📋 Members List")
 def admin_members_list_msg(message):
-    if str(message.from_user.id).strip() != str(ADMIN_CHAT_ID).strip():
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+
+    if str(tg_id).strip() != str(ADMIN_CHAT_ID).strip():
         bot.send_message(message.chat.id, "❌ এই অপশনটি শুধুমাত্র এডমিনের জন্য।")
         return
 
@@ -647,13 +699,20 @@ def admin_members_list_msg(message):
 # 🔘 CALLBACK QUERY HANDLER
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
+    tg_id = call.from_user.id
+    if get_user_status(tg_id) == "Blocked":
+        try:
+            bot.answer_callback_query(call.id, "Access Blocked⛔", show_alert=True)
+        except Exception:
+            pass
+        return
+
     try:
         bot.answer_callback_query(call.id)
     except Exception:
         pass
 
     data = call.data
-    tg_id = call.from_user.id
 
     if data == "confirm_cancel":
         user_temp_data.pop(tg_id, None)
@@ -894,7 +953,7 @@ def handle_all_callbacks(call):
             team_name = TEAM_SLUGS[slug]
             conn = get_db_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("SELECT telegram_id, fb_name, full_name, unique_id FROM members WHERE team_name = %s AND status = 'Approved'", (team_name,))
+            cursor.execute("SELECT telegram_id, fb_name, full_name, unique_id FROM members WHERE team_name = %s AND status = 'Approved' AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
             members = cursor.fetchall()
             conn.close()
 
@@ -950,6 +1009,15 @@ def handle_all_callbacks(call):
             markup.add(InlineKeyboardButton("🔙 Back to Team List", callback_data=back_target))
 
             bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+# 📩 Catch-all Text Message Handler
+@bot.message_handler(func=lambda message: True)
+def handle_all_other_messages(message):
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) == "Blocked":
+        bot.send_message(message.chat.id, "Access Blocked⛔")
+        return
+    bot.send_message(message.chat.id, "প্রধান মেনু:", reply_markup=main_menu(tg_id))
 
 # 🚀 BOT LAUNCH
 if __name__ == "__main__":
