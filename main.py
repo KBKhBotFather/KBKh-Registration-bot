@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,12 +14,12 @@ ADMIN_CHAT_ID = (os.environ.get("ADMIN_CHAT_ID") or os.environ.get("ADMIN_ID") o
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Flask Uptime Server
+# Flask Server for Keep-Alive
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "KBKh Registration Bot is Alive & Running!"
+    return "KBKh Registration Bot is Running!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
@@ -26,13 +27,13 @@ def run_flask():
 # Database Connection
 def get_db_connection():
     if not DB_URI:
-        raise ValueError("DB_URI Environment Variable is missing!")
+        raise ValueError("DB_URI Environment Variable missing!")
     uri = DB_URI
     if uri.startswith("postgres://"):
         uri = uri.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(uri)
 
-# Auto DB Tables Setup
+# Initialize Database Tables
 def init_db():
     try:
         conn = get_db_connection()
@@ -80,14 +81,11 @@ def init_db():
 
 init_db()
 
-# Teams Mapping
 INFO_TEAMS = ["Alpha", "Beta", "Gamma"]
 MEME_TEAMS = ["Electron", "Proton", "Neutron"]
-TEAMS = INFO_TEAMS + MEME_TEAMS
 
 user_temp_data = {}
 
-# Security Code Generator
 def generate_security_code(conn):
     cursor = conn.cursor()
     try:
@@ -100,7 +98,6 @@ def generate_security_code(conn):
         cnt = cursor.fetchone()[0] + 1
         return f"KBKh2022{cnt}"
 
-# Status Checker
 def get_user_status(tg_id):
     if ADMIN_CHAT_ID and str(tg_id).strip() == str(ADMIN_CHAT_ID).strip():
         return "ADMIN"
@@ -119,10 +116,9 @@ def get_user_status(tg_id):
             return status
         return "UNREGISTERED"
     except Exception as e:
-        print(f"DB Error: {e}")
+        print(f"DB Status Error: {e}")
         return "UNREGISTERED"
 
-# Main Keyboards
 def main_menu(user_id):
     status = get_user_status(user_id)
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -173,12 +169,11 @@ def team_select_keyboard():
         InlineKeyboardButton("Neutron", callback_data="select_team_Neutron")
     )
     markup.add(
-        InlineKeyboardButton("Back", callback_data="step_back_team"),
+        InlineKeyboardButton("Back", callback_data="step_back_3"),
         InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt")
     )
     return markup
 
-# Start Command
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     tg_id = message.from_user.id
@@ -198,7 +193,6 @@ def send_welcome(message):
 
     bot.send_message(message.chat.id, text, reply_markup=main_menu(tg_id))
 
-# Refresh Status Button
 @bot.message_handler(func=lambda msg: msg.text in ["Refresh Status 🔄", "🔄 Check Status / Refresh", "Check Status / Refresh"])
 def check_status_refresh(message):
     tg_id = message.from_user.id
@@ -215,7 +209,6 @@ def check_status_refresh(message):
     else:
         bot.send_message(message.chat.id, "Registration Failed!\nPlease Try Again.", reply_markup=main_menu(tg_id))
 
-# Registration Start
 @bot.message_handler(func=lambda msg: msg.text in ["Register Now", "📝 Register Now"])
 def reg_start(message):
     tg_id = message.from_user.id
@@ -234,23 +227,19 @@ def reg_start(message):
     user_temp_data[tg_id] = {'step': 1}
     ask_fb_name(message.chat.id, tg_id)
 
-def ask_fb_name(chat_id, tg_id, message_id=None):
+def ask_fb_name(chat_id, tg_id):
     user_temp_data[tg_id]['step'] = 1
     text = "Enter Your Facebook Profile Name"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt"))
-
-    if message_id:
-        msg = bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
-    else:
-        msg = bot.send_message(chat_id, text, reply_markup=markup)
+    msg = bot.send_message(chat_id, text, reply_markup=markup)
     bot.register_next_step_handler(msg, process_fb_name_input)
 
 def process_fb_name_input(message):
     tg_id = message.from_user.id
     if user_temp_data.get(tg_id, {}).get('step') != 1:
         return
-    user_temp_data[tg_id]['fb_name'] = message.text.strip()
+    user_temp_data[tg_id]['fb_name'] = message.text.strip() if message.text else ""
     ask_full_name(message.chat.id, tg_id)
 
 def ask_full_name(chat_id, tg_id):
@@ -263,7 +252,7 @@ def process_full_name_input(message):
     tg_id = message.from_user.id
     if user_temp_data.get(tg_id, {}).get('step') != 2:
         return
-    user_temp_data[tg_id]['full_name'] = message.text.strip()
+    user_temp_data[tg_id]['full_name'] = message.text.strip() if message.text else ""
     ask_unique_id(message.chat.id, tg_id)
 
 def ask_unique_id(chat_id, tg_id, alert_prefix=""):
@@ -276,7 +265,7 @@ def process_unique_id_input(message):
     tg_id = message.from_user.id
     if user_temp_data.get(tg_id, {}).get('step') != 3:
         return
-    user_temp_data[tg_id]['unique_id'] = message.text.strip()
+    user_temp_data[tg_id]['unique_id'] = message.text.strip() if message.text else ""
     ask_team_select(message.chat.id, tg_id)
 
 def ask_team_select(chat_id, tg_id):
@@ -285,7 +274,6 @@ def ask_team_select(chat_id, tg_id):
     text = "Select Your Team"
     bot.send_message(chat_id, text, reply_markup=team_select_keyboard())
 
-# Summary Review Step
 def show_summary_review(chat_id, tg_id):
     user_temp_data[tg_id]['step'] = 5
     data = user_temp_data.get(tg_id, {})
@@ -304,7 +292,6 @@ def show_summary_review(chat_id, tg_id):
     )
     bot.send_message(chat_id, text, reply_markup=markup)
 
-# My Profile
 @bot.message_handler(func=lambda msg: msg.text in ["My Profile", "👤 My Profile"])
 def view_profile(message):
     tg_id = message.from_user.id
@@ -341,7 +328,6 @@ def view_profile(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
 
-# Change FB Name Flow
 @bot.message_handler(func=lambda msg: msg.text in ["Change Fb Name", "🔄 Change FB Name"])
 def change_fb_name_start(message):
     tg_id = message.from_user.id
@@ -356,19 +342,26 @@ def change_fb_name_start(message):
         return
 
     markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt"))
+    msg = bot.send_message(message.chat.id, "Enter your new Facebook Profile Name:", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_fb_name_change_input)
+
+def process_fb_name_change_input(message):
+    tg_id = message.from_user.id
+    new_name = message.text.strip() if message.text else ""
+    if not new_name:
+        return
+
+    user_temp_data[tg_id] = user_temp_data.get(tg_id, {})
+    user_temp_data[tg_id]['new_fb_name'] = new_name
+
+    markup = InlineKeyboardMarkup()
     markup.add(
-        InlineKeyboardButton("Submit", callback_data="submit_fb_name_change"),
+        InlineKeyboardButton("Submit", callback_data="confirm_fb_name_change"),
         InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt")
     )
-    msg = bot.send_message(message.chat.id, "Enter your new Facebook Profile Name:", reply_markup=markup)
-    bot.register_next_step_handler(msg, process_fb_name_change_text)
+    bot.send_message(message.chat.id, f"New FB Name: {new_name}\n\nClick Submit to confirm.", reply_markup=markup)
 
-def process_fb_name_change_text(message):
-    tg_id = message.from_user.id
-    user_temp_data[tg_id] = user_temp_data.get(tg_id, {})
-    user_temp_data[tg_id]['new_fb_name'] = message.text.strip()
-
-# Request Team Change Flow
 @bot.message_handler(func=lambda msg: msg.text in ["Request Team Change", "🔄 Request Team Change"])
 def team_change_start(message):
     tg_id = message.from_user.id
@@ -393,12 +386,33 @@ def team_change_start(message):
         InlineKeyboardButton("Proton", callback_data="req_team_Proton"),
         InlineKeyboardButton("Neutron", callback_data="req_team_Neutron")
     )
-    markup.add(
-        InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt")
-    )
+    markup.add(InlineKeyboardButton("Cancel", callback_data="step_cancel_prompt"))
     bot.send_message(message.chat.id, "Select Team", reply_markup=markup)
 
-# Callback Handlers
+@bot.message_handler(func=lambda msg: msg.text in ["Already Registered?", "🔑 Already Registered?"])
+def recover_account_start(message):
+    msg = bot.send_message(message.chat.id, "Enter your Security Code to restore account:")
+    bot.register_next_step_handler(msg, process_recovery_code)
+
+def process_recovery_code(message):
+    tg_id = message.from_user.id
+    code = message.text.strip() if message.text else ""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, telegram_id, full_name FROM members WHERE security_code = %s", (code,))
+        user = cursor.fetchone()
+        if user:
+            cursor.execute("UPDATE members SET telegram_id = %s WHERE security_code = %s", (tg_id, code))
+            conn.commit()
+            conn.close()
+            bot.send_message(message.chat.id, f"Account restored successfully! Welcome back {user[2]}.", reply_markup=main_menu(tg_id))
+        else:
+            conn.close()
+            bot.send_message(message.chat.id, "Invalid Security Code. Please try again.", reply_markup=main_menu(tg_id))
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     tg_id = call.from_user.id
@@ -409,7 +423,6 @@ def handle_callbacks(call):
     bot.answer_callback_query(call.id)
     data = call.data
 
-    # Cancel Flow
     if data == "step_cancel_prompt":
         bot.clear_step_handler_by_chat_id(call.message.chat.id)
         markup = InlineKeyboardMarkup()
@@ -437,16 +450,14 @@ def handle_callbacks(call):
         elif step == 4:
             ask_team_select(call.message.chat.id, tg_id)
 
-    # Back Navigation
     elif data.startswith("step_back_"):
         bot.clear_step_handler_by_chat_id(call.message.chat.id)
         curr_step = data.replace("step_back_", "")
-        if curr_step in ["2", "team"]:
+        if curr_step == "2":
             ask_fb_name(call.message.chat.id, tg_id)
         elif curr_step == "3":
             ask_full_name(call.message.chat.id, tg_id)
 
-    # Team Selection and Unique ID Logic Check
     elif data.startswith("select_team_"):
         selected_team = data.replace("select_team_", "")
         data_store = user_temp_data.get(tg_id, {})
@@ -473,7 +484,6 @@ def handle_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}")
 
-    # Final Submit Registration
     elif data == "confirm_final_submit":
         data_store = user_temp_data.get(tg_id, {})
         fb_name = data_store.get('fb_name', '')
@@ -513,8 +523,7 @@ def handle_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}")
 
-    # Change FB Name Submit
-    elif data == "submit_fb_name_change":
+    elif data == "confirm_fb_name_change":
         bot.clear_step_handler_by_chat_id(call.message.chat.id)
         new_name = user_temp_data.get(tg_id, {}).get('new_fb_name')
         if not new_name:
@@ -557,7 +566,6 @@ def handle_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}")
 
-    # Request Team Change Submit
     elif data.startswith("req_team_"):
         new_team = data.replace("req_team_", "")
         try:
@@ -596,7 +604,6 @@ def handle_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}")
 
-    # Admin Approval Feedbacks
     elif data.startswith("app_user_"):
         target_id = int(data.replace("app_user_", ""))
         try:
@@ -710,9 +717,58 @@ def handle_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}")
 
-# Run Bot and Flask Server
+@bot.message_handler(func=lambda msg: msg.text == "Pending Applications")
+def admin_pending_apps(message):
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) != "ADMIN":
+        return
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM members WHERE status = 'Pending' ORDER BY id DESC LIMIT 10")
+        pending = cursor.fetchall()
+        conn.close()
+        if not pending:
+            bot.send_message(message.chat.id, "No pending applications.")
+            return
+        for p in pending:
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("Approve", callback_data=f"app_user_{p['telegram_id']}"),
+                InlineKeyboardButton("Reject", callback_data=f"rej_user_{p['telegram_id']}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"Pending Application:\nFB: {p['fb_name']}\nFull Name: {p['full_name']}\nID: {p['unique_id']}\nTeam: {p['team_name']}\nTG ID: {p['telegram_id']}",
+                reply_markup=markup
+            )
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {e}")
+
+@bot.message_handler(func=lambda msg: msg.text == "Members List")
+def admin_members_list(message):
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) != "ADMIN":
+        return
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM members WHERE status = 'Approved'")
+        cnt = cursor.fetchone()[0]
+        conn.close()
+        bot.send_message(message.chat.id, f"Total Approved Members: {cnt}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {e}")
+
+# Persistent Connection Loop (Fixes 409 Conflict Deployment Crash on Render)
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    bot.infinity_polling(skip_pending=True)
+
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"Polling loop encountered an issue: {e}")
+            time.sleep(3)
