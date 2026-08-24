@@ -33,7 +33,7 @@ def get_db_connection():
         uri = uri.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(uri)
 
-# 🛠️ Auto DB Tables Setup
+# 🛠️ Auto DB Tables Setup & Sync with Bot Control Room
 def init_db():
     try:
         conn = get_db_connection()
@@ -48,7 +48,7 @@ def init_db():
                 full_name TEXT,
                 unique_id TEXT,
                 team_name TEXT,
-                user_type TEXT,
+                user_type TEXT DEFAULT 'General Member',
                 status TEXT DEFAULT 'Pending',
                 security_code TEXT,
                 is_blocked BOOLEAN DEFAULT FALSE,
@@ -58,6 +58,10 @@ def init_db():
 
             ALTER TABLE members ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;
             ALTER TABLE members ADD COLUMN IF NOT EXISTS is_removed BOOLEAN DEFAULT FALSE;
+
+            -- Fix NULL values for Control Room Compatibility
+            UPDATE members SET is_blocked = FALSE WHERE is_blocked IS NULL;
+            UPDATE members SET is_removed = FALSE WHERE is_removed IS NULL;
 
             CREATE TABLE IF NOT EXISTS fb_name_requests (
                 id SERIAL PRIMARY KEY,
@@ -79,12 +83,13 @@ def init_db():
         """)
         conn.commit()
         conn.close()
+        print("DB Initialized & Synchronized Successfully!")
     except Exception as e:
         print(f"DB Init Error: {e}")
 
 init_db()
 
-# 🏢 Teams & Categories Mapping
+# 🏢 Teams Mapping
 INFO_TEAMS = ["Alpha", "Beta", "Gamma"]
 MEME_TEAMS = ["Electron", "Proton", "Neutron"]
 TEAMS = INFO_TEAMS + MEME_TEAMS
@@ -126,7 +131,7 @@ def get_user_status(tg_id):
         print(f"DB Error: {e}")
         return "UNREGISTERED"
 
-# 📱 Keyboards Helper
+# 📱 Main Keyboards Helper
 def main_menu(user_id):
     status = get_user_status(user_id)
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False)
@@ -174,34 +179,26 @@ def team_select_keyboard():
     markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
     return markup
 
-def cancel_confirm_inline():
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("Yes✅", callback_data="confirm_cancel_yes"),
-        InlineKeyboardButton("No❌", callback_data="confirm_cancel_no")
-    )
-    return markup
+# 🛑 Immediate Direct Cancel Helper (No Permission Dialog)
+def direct_cancel(message):
+    tg_id = message.from_user.id
+    user_temp_data.pop(tg_id, None)
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    bot.send_message(message.chat.id, "Process Cancelled✅", reply_markup=main_menu(tg_id))
 
-# 🛑 Cancel Interceptor helper
-def trigger_cancel_asking(message):
-    bot.send_message(
-        message.chat.id,
-        "Are you sure you want to cancle the Process?",
-        reply_markup=cancel_confirm_inline()
-    )
-
-# 📌 /start Command
+# 📌 /start Command Handler
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     tg_id = message.from_user.id
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    user_temp_data.pop(tg_id, None)
+
     status = get_user_status(tg_id)
 
     if status == "Blocked":
         bot.send_message(message.chat.id, "Access Blocked⛔")
         return
 
-    user_temp_data.pop(tg_id, None)
-    
     if status == "ADMIN":
         bot.send_message(message.chat.id, "Welcome Admin Panel", reply_markup=main_menu(tg_id))
     elif status == "Approved":
@@ -209,7 +206,7 @@ def send_welcome(message):
     elif status == "Pending":
         bot.send_message(message.chat.id, "Status: Pending⏳", reply_markup=main_menu(tg_id))
     else:
-        bot.send_message(message.chat.id, "Welcome to KBKh Science Ecosystem", reply_markup=main_menu(tg_id))
+        bot.send_message(message.chat.id, "Welcome to KBKh Bot Ecosystem. Please Registration Now!", reply_markup=main_menu(tg_id))
 
 # 🔄 Refresh Status Button Handler
 @bot.message_handler(func=lambda msg: msg.text == "Refresh Status 🔄")
@@ -251,13 +248,12 @@ def reg_start(message):
 def process_reg_steps(message):
     tg_id = message.from_user.id
     text = message.text.strip() if message.text else ""
-    data = user_temp_data.get(tg_id, {})
 
     if text == "Cancel":
-        trigger_cancel_asking(message)
-        bot.register_next_step_handler(message, process_reg_steps)
+        direct_cancel(message)
         return
 
+    data = user_temp_data.get(tg_id, {})
     step = data.get('step')
 
     if step == 'fb_name':
@@ -366,8 +362,7 @@ def process_recovery(message):
     sec_code = message.text.strip() if message.text else ""
 
     if sec_code == "Cancel":
-        trigger_cancel_asking(message)
-        bot.register_next_step_handler(message, process_recovery)
+        direct_cancel(message)
         return
 
     try:
@@ -471,8 +466,7 @@ def process_fb_name_change(message):
     new_fb_name = message.text.strip() if message.text else ""
 
     if new_fb_name == "Cancel":
-        trigger_cancel_asking(message)
-        bot.register_next_step_handler(message, process_fb_name_change)
+        direct_cancel(message)
         return
 
     user_temp_data[tg_id]['new_fb_name'] = new_fb_name
@@ -522,7 +516,6 @@ def team_change_start(message):
             return
 
         user_temp_data[tg_id] = {'flow': 'team_change', 'old_team': user[0], 'selected_team': None}
-        
         send_team_change_inline_ui(message.chat.id, user[0], None)
     except Exception as e:
         bot.send_message(message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
@@ -703,12 +696,12 @@ def admin_show_team_members(message):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND status = 'Approved' AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
+        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
         members = cursor.fetchall()
         conn.close()
 
         if not members:
-            bot.send_message(message.chat.id, f"No approved members in {team_name}.", reply_markup=cancel_keyboard(show_back=True))
+            bot.send_message(message.chat.id, f"No members found in {team_name}.", reply_markup=cancel_keyboard(show_back=True))
             return
 
         markup = InlineKeyboardMarkup()
@@ -722,14 +715,14 @@ def admin_show_team_members(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Error: {e}")
 
-# 🔙 BACK & CANCEL GENERAL TEXT HANDLER
+# 🔙 BACK & CANCEL GENERAL HANDLER
 @bot.message_handler(func=lambda msg: msg.text in ["Back", "Cancel"])
 def handle_back_or_cancel_text(message):
     tg_id = message.from_user.id
     text = message.text
 
     if text == "Cancel":
-        trigger_cancel_asking(message)
+        direct_cancel(message)
     elif text == "Back":
         status = get_user_status(tg_id)
         if status == "ADMIN":
@@ -755,13 +748,9 @@ def handle_all_callbacks(call):
 
     data = call.data
 
-    if data == "confirm_cancel_yes":
+    if data in ["cancel_reg_inline", "confirm_cancel_yes", "confirm_cancel_no"]:
         user_temp_data.pop(tg_id, None)
         bot.clear_step_handler_by_chat_id(call.message.chat.id)
-        bot.edit_message_text("Process Cancelled✅", call.message.chat.id, call.message.message_id)
-        bot.send_message(call.message.chat.id, "Main Menu", reply_markup=main_menu(tg_id))
-
-    elif data in ["confirm_cancel_no", "cancel_reg_inline"]:
         bot.edit_message_text("Process Cancelled✅", call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, "Main Menu", reply_markup=main_menu(tg_id))
 
@@ -1044,7 +1033,7 @@ def handle_all_callbacks(call):
                 f"ID: {m['unique_id']}\n"
                 f"Team: {m['team_name']}\n"
                 f"TG ID: {m['telegram_id']}\n"
-                f"🫆Security Code: {m['security_code']}"
+                f"🫆Security Code: {m['security_code'] if m['security_code'] else ''}"
             )
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("Back", callback_data=f"back_mem_list_{m['team_name']}"))
@@ -1054,7 +1043,7 @@ def handle_all_callbacks(call):
         team_name = data.replace("back_mem_list_", "")
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND status = 'Approved' AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
+        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
         members = cursor.fetchall()
         conn.close()
 
@@ -1065,7 +1054,7 @@ def handle_all_callbacks(call):
 
         bot.edit_message_text(f"Members of {team_name}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-# 🚀 Robust Polling Execution (Fixes 409 Conflict)
+# 🚀 Polling Runner
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
