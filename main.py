@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import psycopg2
@@ -406,7 +407,7 @@ def change_fb_name_start(message):
         conn.close()
 
         if pending_req:
-            bot.send_message(message.chat.id, "⚠️ **আপনার একটি ফেসবুক নাম পরিবর্তনের আবেদন ইতিমধ্যেই পেন্ডিং রয়েছে!**\nএডমিন সেটি প্রসেস না করা পর্যন্ত পুনরায় আবেদন করা যাবে না।", parse_mode="Markdown", reply_markup=main_menu(tg_id))
+            bot.send_message(message.chat.id, "⚠️ **আপনার একটি ফেসবুক নাম পরিবর্তনের আবেদন ইতিমধ্যেই পেন্ডিং রয়েছে!**\nএডমিন সেটি প্রসেস না করা পর্যন্ত পুনরায় আবেদন করা যাবেবিধা নেই।", parse_mode="Markdown", reply_markup=main_menu(tg_id))
             return
     except Exception as e:
         print(f"Check Pending FB Name Error: {e}")
@@ -1022,6 +1023,21 @@ def handle_all_other_messages(message):
 # 🚀 BOT LAUNCH
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
+    t.daemon = True # ব্যাকগ্রাউন্ড থ্রেড অপ্টিমাইজেশন
     t.start()
     print("🤖 KBKh Registration Bot is Running...")
-    bot.infinity_polling()
+    
+    # Webhook ক্লিয়ার করে একটু সময় নেওয়া, যাতে কনফ্লিক্ট না হয়
+    try:
+        bot.remove_webhook()
+        time.sleep(2) 
+    except Exception as e:
+        print(f"Webhook notice: {e}")
+
+    # Polling শুরু করা (অটো-রিট্রাই সিস্টেম সহ)
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            print(f"Polling error: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
