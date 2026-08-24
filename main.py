@@ -56,8 +56,14 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Ensure columns exist if table was created previously without them
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS id SERIAL;
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS user_type TEXT DEFAULT 'General Member';
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Pending';
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS security_code TEXT;
             ALTER TABLE members ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;
             ALTER TABLE members ADD COLUMN IF NOT EXISTS is_removed BOOLEAN DEFAULT FALSE;
+            ALTER TABLE members ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 
             -- Fix NULL values for Control Room Compatibility
             UPDATE members SET is_blocked = FALSE WHERE is_blocked IS NULL;
@@ -168,6 +174,11 @@ def cancel_keyboard(show_back=False):
         markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
     else:
         markup.add(KeyboardButton("Cancel"))
+    return markup
+
+def inline_cancel_keyboard():
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Cancel ❌", callback_data="cancel_reg_inline"))
     return markup
 
 def team_select_keyboard():
@@ -458,7 +469,8 @@ def change_fb_name_start(message):
         print(f"Check Pending FB Name Error: {e}")
 
     user_temp_data[tg_id] = {'flow': 'fb_name_change'}
-    msg = bot.send_message(message.chat.id, "Enter your new Facebook Profile Name:", reply_markup=cancel_keyboard(show_back=False))
+    # Attach Inline Cancel button directly under text message
+    msg = bot.send_message(message.chat.id, "Enter your new Facebook Profile Name:", reply_markup=inline_cancel_keyboard())
     bot.register_next_step_handler(msg, process_fb_name_change)
 
 def process_fb_name_change(message):
@@ -696,7 +708,8 @@ def admin_show_team_members(message):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
+        # telegram_id used directly to eliminate missing 'id' column errors
+        cursor.execute("SELECT telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
         members = cursor.fetchall()
         conn.close()
 
@@ -707,7 +720,7 @@ def admin_show_team_members(message):
         markup = InlineKeyboardMarkup()
         for m in members:
             display_name = m['full_name'] or m['fb_name'] or str(m['telegram_id'])
-            markup.add(InlineKeyboardButton(display_name, callback_data=f"view_mem_{m['id']}"))
+            markup.add(InlineKeyboardButton(display_name, callback_data=f"view_mem_{m['telegram_id']}"))
 
         bot.send_message(message.chat.id, f"Members of {team_name}:", reply_markup=markup)
         bot.send_message(message.chat.id, "Navigation:", reply_markup=cancel_keyboard(show_back=True))
@@ -1018,10 +1031,10 @@ def handle_all_callbacks(call):
         conn.close()
 
     elif data.startswith("view_mem_"):
-        mem_id = int(data.replace("view_mem_", ""))
+        target_tg_id = int(data.replace("view_mem_", ""))
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM members WHERE id = %s", (mem_id,))
+        cursor.execute("SELECT * FROM members WHERE telegram_id = %s", (target_tg_id,))
         m = cursor.fetchone()
         conn.close()
 
@@ -1043,14 +1056,14 @@ def handle_all_callbacks(call):
         team_name = data.replace("back_mem_list_", "")
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
+        cursor.execute("SELECT telegram_id, fb_name, full_name, unique_id, team_name, security_code FROM members WHERE team_name = %s AND is_blocked = FALSE AND is_removed = FALSE", (team_name,))
         members = cursor.fetchall()
         conn.close()
 
         markup = InlineKeyboardMarkup()
         for m in members:
             display_name = m['full_name'] or m['fb_name'] or str(m['telegram_id'])
-            markup.add(InlineKeyboardButton(display_name, callback_data=f"view_mem_{m['id']}"))
+            markup.add(InlineKeyboardButton(display_name, callback_data=f"view_mem_{m['telegram_id']}"))
 
         bot.edit_message_text(f"Members of {team_name}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
