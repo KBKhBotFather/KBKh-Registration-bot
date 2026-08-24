@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -311,7 +312,6 @@ def process_reg_steps(message):
         unique_id = data.get('unique_id', '').strip()
         cat_teams = INFO_TEAMS if selected_team in INFO_TEAMS else MEME_TEAMS
 
-        # Check unique_id duplication in category
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -379,12 +379,10 @@ def process_recovery(message):
         if user:
             old_tg_id = user['telegram_id']
 
-            # Clean up temporary records created under new TG ID
             cursor.execute("DELETE FROM members WHERE telegram_id = %s AND security_code IS DISTINCT FROM %s", (tg_id, sec_code))
             cursor.execute("DELETE FROM fb_name_requests WHERE telegram_id = %s", (tg_id,))
             cursor.execute("DELETE FROM team_change_requests WHERE telegram_id = %s", (tg_id,))
 
-            # Transfer security code ownership to new TG ID
             cursor.execute("UPDATE members SET telegram_id = %s WHERE security_code = %s", (tg_id, sec_code))
             cursor.execute("UPDATE fb_name_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg_id))
             cursor.execute("UPDATE team_change_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg_id))
@@ -757,7 +755,6 @@ def handle_all_callbacks(call):
 
     data = call.data
 
-    # Cancel Confirmation Inline Callbacks
     if data == "confirm_cancel_yes":
         user_temp_data.pop(tg_id, None)
         bot.clear_step_handler_by_chat_id(call.message.chat.id)
@@ -768,7 +765,6 @@ def handle_all_callbacks(call):
         bot.edit_message_text("Process Cancelled✅", call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, "Main Menu", reply_markup=main_menu(tg_id))
 
-    # Submit Registration
     elif data == "submit_reg":
         u_data = user_temp_data.get(tg_id, {})
         if not u_data:
@@ -811,7 +807,6 @@ def handle_all_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
 
-    # Submit FB Name Change
     elif data == "submit_fb_name":
         u_data = user_temp_data.get(tg_id, {})
         new_name = u_data.get('new_fb_name')
@@ -843,7 +838,6 @@ def handle_all_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
 
-    # Interactive Team Change Selection
     elif data.startswith("sel_tm_"):
         sel_t = data.replace("sel_tm_", "")
         u_data = user_temp_data.get(tg_id, {})
@@ -873,7 +867,6 @@ def handle_all_callbacks(call):
         )
         bot.edit_message_text("Select Team", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-    # Submit Team Change
     elif data == "submit_team_change":
         u_data = user_temp_data.get(tg_id, {})
         requested_team = u_data.get('selected_team')
@@ -911,7 +904,6 @@ def handle_all_callbacks(call):
         except Exception as e:
             bot.send_message(call.message.chat.id, f"Error: {e}", reply_markup=main_menu(tg_id))
 
-    # ADMIN ACTIONS: APPROVE / REJECT REGISTRATION
     elif data.startswith("app_user_"):
         target_id = int(data.replace("app_user_", ""))
         conn = get_db_connection()
@@ -954,7 +946,6 @@ def handle_all_callbacks(call):
         except Exception:
             pass
 
-    # ADMIN ACTIONS: APPROVE / REJECT FB NAME
     elif data.startswith("app_fbreq_"):
         req_id = int(data.replace("app_fbreq_", ""))
         conn = get_db_connection()
@@ -996,7 +987,6 @@ def handle_all_callbacks(call):
                 pass
         conn.close()
 
-    # ADMIN ACTIONS: APPROVE / REJECT TEAM CHANGE
     elif data.startswith("app_tmreq_"):
         req_id = int(data.replace("app_tmreq_", ""))
         conn = get_db_connection()
@@ -1038,7 +1028,6 @@ def handle_all_callbacks(call):
                 pass
         conn.close()
 
-    # ADMIN MEMBER DETAIL VIEW
     elif data.startswith("view_mem_"):
         mem_id = int(data.replace("view_mem_", ""))
         conn = get_db_connection()
@@ -1076,11 +1065,22 @@ def handle_all_callbacks(call):
 
         bot.edit_message_text(f"Members of {team_name}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-# 🚀 Start Flask and Bot Polling
+# 🚀 Robust Polling Execution (Fixes 409 Conflict)
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
 
     print("🤖 KBKh Registration Bot is Running...")
-    bot.infinity_polling(skip_pending=True)
+
+    try:
+        bot.remove_webhook()
+    except Exception as e:
+        print(f"Webhook Clean Note: {e}")
+
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=20)
+        except Exception as e:
+            print(f"Polling conflict handled: {e}")
+            time.sleep(5)
