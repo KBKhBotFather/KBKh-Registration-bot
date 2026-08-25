@@ -132,10 +132,17 @@ def get_user_status(tg_id):
     except Exception:
         return "UNREGISTERED"
 
-# 📱 Reply Keyboards
+
+# 📱 Reply Keyboards (Persistent Fix Applied Here)
+def create_reply_kb(row_width=2):
+    try:
+        return ReplyKeyboardMarkup(row_width=row_width, resize_keyboard=True, is_persistent=True)
+    except TypeError:
+        return ReplyKeyboardMarkup(row_width=row_width, resize_keyboard=True)
+
 def main_menu(user_id):
     status = get_user_status(user_id)
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup = create_reply_kb(row_width=2)
     if status == "ADMIN":
         markup.add(KeyboardButton("Pending Applications"), KeyboardButton("Members List"))
     elif status == "Approved":
@@ -149,22 +156,22 @@ def main_menu(user_id):
     return markup
 
 def cancel_only_kb():
-    return ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("Cancel"))
+    return create_reply_kb().add(KeyboardButton("Cancel"))
 
 def back_cancel_kb():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = create_reply_kb(row_width=2)
     markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
     return markup
 
 def team_select_kb():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    markup = create_reply_kb(row_width=3)
     markup.add(KeyboardButton("Alpha"), KeyboardButton("Beta"), KeyboardButton("Gamma"))
     markup.add(KeyboardButton("Electron"), KeyboardButton("Proton"), KeyboardButton("Neutron"))
     markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
     return markup
 
 def submit_cancel_kb():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = create_reply_kb(row_width=2)
     markup.add(KeyboardButton("Submit"), KeyboardButton("Cancel"))
     return markup
 
