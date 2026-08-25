@@ -72,6 +72,11 @@ def init_db():
                 status TEXT DEFAULT 'Pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS bots_list (
+                id SERIAL PRIMARY KEY,
+                team_category TEXT,
+                username TEXT
+            );
         """)
         conn.commit()
         conn.close()
@@ -92,6 +97,7 @@ def get_admin_state(tg_id):
     st.setdefault('exp_tc', set())
     st.setdefault('exp_mem', set())
     st.setdefault('proc_msgs', [])
+    st.setdefault('ab_del', set())
     return st
 
 def generate_security_code(conn):
@@ -132,7 +138,6 @@ def get_user_status(tg_id):
     except Exception:
         return "UNREGISTERED"
 
-
 # 📱 Reply Keyboards (Persistent Fix Applied Here)
 def create_reply_kb(row_width=2):
     try:
@@ -145,8 +150,10 @@ def main_menu(user_id):
     markup = create_reply_kb(row_width=2)
     if status == "ADMIN":
         markup.add(KeyboardButton("Pending Applications"), KeyboardButton("Members List"))
+        markup.add(KeyboardButton("Add Bot"))
     elif status == "Approved":
-        markup.add(KeyboardButton("My Profile"), KeyboardButton("Change FB Name"), KeyboardButton("Request Team Change"))
+        markup.add(KeyboardButton("My Profile"), KeyboardButton("Change FB Name"))
+        markup.add(KeyboardButton("Request Team Change"), KeyboardButton("My Bots"))
     elif status == "Pending":
         markup.add(KeyboardButton("🔄 Refresh Status"))
     elif status == "Blocked":
@@ -160,13 +167,6 @@ def cancel_only_kb():
 
 def back_cancel_kb():
     markup = create_reply_kb(row_width=2)
-    markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
-    return markup
-
-def team_select_kb():
-    markup = create_reply_kb(row_width=3)
-    markup.add(KeyboardButton("Alpha"), KeyboardButton("Beta"), KeyboardButton("Gamma"))
-    markup.add(KeyboardButton("Electron"), KeyboardButton("Proton"), KeyboardButton("Neutron"))
     markup.add(KeyboardButton("Back"), KeyboardButton("Cancel"))
     return markup
 
@@ -215,7 +215,7 @@ def check_status_refresh(message):
     elif status == "Approved":
         bot.send_message(message.chat.id, "Registration approval was successful!✅", reply_markup=main_menu(message.from_user.id))
 
-# 📝 1. NEW REGISTRATION FLOW
+# 📝 1. NEW REGISTRATION FLOW (Inline Team Select & Confirm)
 @bot.message_handler(func=lambda msg: msg.text == "Registration Now")
 def reg_start(message):
     tg_id = message.from_user.id
@@ -223,111 +223,51 @@ def reg_start(message):
         return bot.send_message(message.chat.id, "Action not allowed.", reply_markup=main_menu(tg_id))
     user_temp_data[tg_id] = {}
     msg = bot.send_message(message.chat.id, "Enter Your Facebook Profile Name", reply_markup=cancel_only_kb())
-    bot.register_next_step_handler(msg, reg_full_name)
+    bot.register_next_step_handler(msg, step_fb_name)
 
-def reg_full_name(message):
+def step_fb_name(message):
     if message.text == "Cancel": return cancel_process(message)
     tg_id = message.from_user.id
     user_temp_data[tg_id]['fb'] = message.text.strip()
     msg = bot.send_message(message.chat.id, "Enter Your Full Name In English", reply_markup=back_cancel_kb())
-    bot.register_next_step_handler(msg, reg_unique_id)
+    bot.register_next_step_handler(msg, step_full_name)
 
-def reg_unique_id(message):
+def step_full_name(message):
     tg_id = message.from_user.id
     if message.text == "Cancel": return cancel_process(message)
     if message.text == "Back":
         msg = bot.send_message(message.chat.id, "Enter Your Facebook Profile Name", reply_markup=cancel_only_kb())
-        bot.register_next_step_handler(msg, reg_full_name)
+        bot.register_next_step_handler(msg, step_fb_name)
         return
     user_temp_data[tg_id]['full'] = message.text.strip()
     msg = bot.send_message(message.chat.id, "Enter Your Unique ID (Given by Team)", reply_markup=back_cancel_kb())
-    bot.register_next_step_handler(msg, reg_team)
+    bot.register_next_step_handler(msg, step_uid)
 
-def reg_team(message):
+def step_uid(message):
     tg_id = message.from_user.id
     if message.text == "Cancel": return cancel_process(message)
     if message.text == "Back":
         msg = bot.send_message(message.chat.id, "Enter Your Full Name In English", reply_markup=back_cancel_kb())
-        bot.register_next_step_handler(msg, reg_unique_id)
+        bot.register_next_step_handler(msg, step_full_name)
         return
     user_temp_data[tg_id]['uid'] = message.text.strip()
-    msg = bot.send_message(message.chat.id, "Select Your Team", reply_markup=team_select_kb())
-    bot.register_next_step_handler(msg, reg_confirm)
-
-def reg_confirm(message):
-    tg_id = message.from_user.id
-    if message.text == "Cancel": return cancel_process(message)
-    if message.text == "Back":
-        msg = bot.send_message(message.chat.id, "Enter Your Unique ID (Given by Team)", reply_markup=back_cancel_kb())
-        bot.register_next_step_handler(msg, reg_team)
-        return
-    team = message.text.strip()
-    if team not in ["Alpha", "Beta", "Gamma", "Electron", "Proton", "Neutron"]:
-        msg = bot.send_message(message.chat.id, "Select Your Team", reply_markup=team_select_kb())
-        bot.register_next_step_handler(msg, reg_confirm)
-        return
     
-    team_full = f"Team {team}"
-    uid = user_temp_data[tg_id]['uid']
-    cat_teams = INFO_TEAMS if team_full in INFO_TEAMS else MEME_TEAMS
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s) AND is_removed = FALSE AND status != 'Removed'", (uid, cat_teams))
-        exists_count = cursor.fetchone()[0]
-        conn.close()
-        
-        if exists_count > 0:
-            msg = bot.send_message(message.chat.id, "⚠️ Invalid Unique Id\n\nEnter Your Unique ID (Given by Team)", reply_markup=back_cancel_kb())
-            bot.register_next_step_handler(msg, reg_team)
-            return
-            
-        user_temp_data[tg_id]['team_full'] = team_full
-        user_temp_data[tg_id]['team_short'] = team
-        summary = (f"👤Profile Summary\n"
-                   f"FB Name: {user_temp_data[tg_id]['fb']}\n"
-                   f"Full Name: {user_temp_data[tg_id]['full']}\n"
-                   f"Unique ID: {uid}\n"
-                   f"Team: {team}\n\n"
-                   f"Please recheck your final profile")
-        
-        msg = bot.send_message(message.chat.id, summary, reply_markup=submit_cancel_kb())
-        bot.register_next_step_handler(msg, reg_submit_final)
-    except Exception:
-        bot.send_message(message.chat.id, "Error processing request.", reply_markup=main_menu(tg_id))
+    # Hide Text Input bar cleanly
+    rm_msg = bot.send_message(message.chat.id, "⏳", reply_markup=ReplyKeyboardRemove())
+    bot.delete_message(message.chat.id, rm_msg.message_id)
 
-def reg_submit_final(message):
-    tg_id = message.from_user.id
-    if message.text == "Cancel": return cancel_process(message)
-    if message.text == "Submit":
-        data = user_temp_data.get(tg_id, {})
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM members WHERE telegram_id = %s", (tg_id,))
-            cursor.execute("INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')", 
-                           (tg_id, data.get('fb'), data.get('full'), data.get('uid'), data.get('team_full'), 'General Member'))
-            conn.commit()
-            
-            if ADMIN_CHAT_ID:
-                prev_code = get_preview_code(conn)
-                admin_text = (f"🎫New Registration Request!\n\n"
-                              f"👤Profile Summary\n"
-                              f"FB Name: {data.get('fb')}\n"
-                              f"Full Name: {data.get('full')}\n"
-                              f"Unique ID: {data.get('uid')}\n"
-                              f"Team: {data.get('team_short')}\n"
-                              f"🫆Security Code: {prev_code}")
-                kb = InlineKeyboardMarkup(row_width=2)
-                kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apr_{tg_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjr_{tg_id}"))
-                bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
-            conn.close()
-            
-            bot.send_message(message.chat.id, "✅ Registration Request Submitted!\n\nYour application has been placed on admin pending!", reply_markup=main_menu(tg_id))
-            user_temp_data.pop(tg_id, None)
-        except Exception:
-            bot.send_message(message.chat.id, "Submission Failed❌", reply_markup=main_menu(tg_id))
+    # Move to Inline Keyboard for team selection (No typing possible!)
+    kb = InlineKeyboardMarkup(row_width=3)
+    kb.add(InlineKeyboardButton("Alpha", callback_data="reg_t_Alpha"),
+           InlineKeyboardButton("Beta", callback_data="reg_t_Beta"),
+           InlineKeyboardButton("Gamma", callback_data="reg_t_Gamma"))
+    kb.add(InlineKeyboardButton("Electron", callback_data="reg_t_Electron"),
+           InlineKeyboardButton("Proton", callback_data="reg_t_Proton"),
+           InlineKeyboardButton("Neutron", callback_data="reg_t_Neutron"))
+    kb.row(InlineKeyboardButton("Back", callback_data="reg_back_team"), InlineKeyboardButton("Cancel", callback_data="reg_cancel"))
+
+    bot.send_message(message.chat.id, "Select Your Team", reply_markup=kb)
+
 
 # 🔑 2. ALREADY REGISTERED
 @bot.message_handler(func=lambda msg: msg.text == "Already Registered")
@@ -364,6 +304,7 @@ def process_recovery(message):
     except Exception:
         bot.send_message(message.chat.id, "Process Failed❌", reply_markup=main_menu(tg_id))
 
+
 # 👤 3. MY PROFILE
 @bot.message_handler(func=lambda msg: msg.text == "My Profile")
 def view_profile(message):
@@ -386,6 +327,7 @@ def view_profile(message):
                            f"🫆Security Code: {user[4]}")
             bot.send_message(message.chat.id, profile_msg, reply_markup=main_menu(tg_id))
     except Exception: pass
+
 
 # 🔄 4. CHANGE FB NAME
 @bot.message_handler(func=lambda msg: msg.text == "Change FB Name")
@@ -439,6 +381,7 @@ def process_fb_submit(message):
         except Exception:
             bot.send_message(message.chat.id, "Failed❌", reply_markup=main_menu(tg_id))
 
+
 # 🔄 5. REQUEST TEAM CHANGE
 def get_tc_inline_kb(current_full, selected_short=None):
     kb = InlineKeyboardMarkup(row_width=3)
@@ -475,7 +418,40 @@ def tc_start(message):
         bot.send_message(message.chat.id, "Select Team", reply_markup=get_tc_inline_kb(res[0]))
     except Exception: pass
 
-# 👑 6. ADMIN PANEL
+
+# 🤖 6. MY BOTS (General User Feature)
+@bot.message_handler(func=lambda msg: msg.text == "My Bots")
+def user_my_bots(message):
+    if enforce_registration(message): return
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) != "Approved": return
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT team_name FROM members WHERE telegram_id = %s", (tg_id,))
+        res = cursor.fetchone()
+        if not res:
+            conn.close()
+            return
+        
+        cat_str = "Info Team" if res[0] in INFO_TEAMS else "Meme Team"
+        
+        cursor.execute("SELECT username FROM bots_list WHERE team_category = %s", (cat_str,))
+        bots = cursor.fetchall()
+        conn.close()
+        
+        if not bots:
+            text = "You can use all these bots:\n\n(coming soon!)"
+        else:
+            bot_names = "\n\n".join([b[0] for b in bots])
+            text = f"You can use all these bots:\n\n{bot_names}"
+            
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(tg_id))
+    except Exception:
+        pass
+
+
+# 👑 7. ADMIN PANEL
 @bot.message_handler(func=lambda msg: msg.text == "Pending Applications")
 def admin_pend(message):
     if str(message.from_user.id) != ADMIN_CHAT_ID: return
@@ -516,6 +492,66 @@ def render_admin_mem_menu(chat_id, message_id=None):
     if message_id: bot.edit_message_text("Select Team", chat_id, message_id, reply_markup=kb)
     else: bot.send_message(chat_id, "Select Team", reply_markup=kb)
 
+# --- ADD BOT ADMIN PANEL ---
+@bot.message_handler(func=lambda msg: msg.text == "Add Bot")
+def admin_add_bot(message):
+    if str(message.from_user.id) != ADMIN_CHAT_ID: return
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.row(InlineKeyboardButton("Info Team", callback_data="ab_cat_Info"), InlineKeyboardButton("Meme Team", callback_data="ab_cat_Meme"))
+    kb.add(InlineKeyboardButton("Cancel", callback_data="ad_cancel_msg"))
+    bot.send_message(message.chat.id, "Select team to manage bots:", reply_markup=kb)
+
+def render_ab_list(chat_id, message_id, tg_id):
+    st = get_admin_state(tg_id)
+    cat = st.get('ab_cat', 'Info')
+    del_set = st.get('ab_del', set())
+    team_str = "Info Team" if cat == "Info" else "Meme Team"
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM bots_list WHERE team_category = %s", (team_str,))
+    bots = cursor.fetchall()
+    conn.close()
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    if not bots:
+        kb.add(InlineKeyboardButton("(No bots added yet)", callback_data="ignore"))
+    else:
+        for b in bots:
+            icon = "🗑️" if b['id'] in del_set else "❌"
+            kb.add(InlineKeyboardButton(f"{b['username']} {icon}", callback_data=f"ab_tog_{b['id']}"))
+            
+    kb.row(InlineKeyboardButton("Add", callback_data="ab_add"), InlineKeyboardButton("Cancel", callback_data="ad_cancel_msg"))
+    kb.add(InlineKeyboardButton("Submit", callback_data="ab_submit"))
+    
+    bot.edit_message_text(f"Manage Bots ({team_str}):", chat_id, message_id, reply_markup=kb)
+
+def process_add_bot(message):
+    tg_id = message.from_user.id
+    if message.text == "Cancel": return cancel_process(message)
+    username = message.text.strip()
+    if not username.startswith("@"): username = "@" + username
+    
+    st = get_admin_state(tg_id)
+    cat = st.get('ab_cat', 'Info')
+    team_str = "Info Team" if cat == "Info" else "Meme Team"
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO bots_list (team_category, username) VALUES (%s, %s)", (team_str, username))
+        conn.commit()
+        conn.close()
+        
+        # Give Yes/No option natively through Inline Keyboard for neatness
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(InlineKeyboardButton("Yes✅", callback_data="ab_more_yes"), InlineKeyboardButton("No❌", callback_data="ab_more_no"))
+        
+        rm_msg = bot.send_message(message.chat.id, "⏳", reply_markup=ReplyKeyboardRemove())
+        bot.delete_message(message.chat.id, rm_msg.message_id)
+        bot.send_message(message.chat.id, "Do you want to add more?", reply_markup=kb)
+    except Exception:
+        bot.send_message(message.chat.id, "Failed❌", reply_markup=main_menu(tg_id))
 
 # --- LIST RENDERERS FOR ADMIN ---
 def render_pend_reg_list(chat_id, message_id, tg_id):
@@ -623,9 +659,85 @@ def callbacks(call):
     st = get_admin_state(tg_id)
     try: bot.answer_callback_query(call.id)
     except Exception: pass
+    
+    # 📝 INLINE REGISTRATION SELECTION LOGIC 
+    if data.startswith("reg_t_"):
+        team = data.split("_")[2]
+        team_full = f"Team {team}"
+        uid = user_temp_data[tg_id].get('uid')
+        cat_teams = INFO_TEAMS if team_full in INFO_TEAMS else MEME_TEAMS
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM members WHERE LOWER(unique_id) = LOWER(%s) AND team_name = ANY(%s) AND is_removed = FALSE AND status != 'Removed'", (uid, cat_teams))
+            exists_count = cursor.fetchone()[0]
+            conn.close()
+            
+            if exists_count > 0:
+                kb = InlineKeyboardMarkup(row_width=2)
+                kb.row(InlineKeyboardButton("Back", callback_data="reg_back_team"), InlineKeyboardButton("Cancel", callback_data="reg_cancel"))
+                bot.edit_message_text("⚠️ Invalid Unique Id\n\nSelect your team again or go back:", call.message.chat.id, call.message.message_id, reply_markup=kb)
+                return
+                
+            user_temp_data[tg_id]['team_full'] = team_full
+            user_temp_data[tg_id]['team_short'] = team
+            summary = (f"👤Profile Summary\n"
+                       f"FB Name: {user_temp_data[tg_id]['fb']}\n"
+                       f"Full Name: {user_temp_data[tg_id]['full']}\n"
+                       f"Unique ID: {uid}\n"
+                       f"Team: {team}\n\n"
+                       f"Please recheck your final profile")
+            
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.row(InlineKeyboardButton("Submit", callback_data="reg_submit"), InlineKeyboardButton("Cancel", callback_data="reg_cancel"))
+            bot.edit_message_text(summary, call.message.chat.id, call.message.message_id, reply_markup=kb)
+        except Exception:
+            bot.edit_message_text("Error processing request.", call.message.chat.id, call.message.message_id)
+
+    elif data == "reg_back_team":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        msg = bot.send_message(call.message.chat.id, "Enter Your Unique ID (Given by Team)", reply_markup=back_cancel_kb())
+        bot.register_next_step_handler(msg, step_uid)
+        
+    elif data == "reg_cancel":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        user_temp_data.pop(tg_id, None)
+        bot.send_message(call.message.chat.id, "Process Cancelled✅", reply_markup=main_menu(tg_id))
+        
+    elif data == "reg_submit":
+        db_data = user_temp_data.get(tg_id, {})
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM members WHERE telegram_id = %s", (tg_id,))
+            cursor.execute("INSERT INTO members (telegram_id, fb_name, full_name, unique_id, team_name, user_type, status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')", 
+                           (tg_id, db_data.get('fb'), db_data.get('full'), db_data.get('uid'), db_data.get('team_full'), 'General Member'))
+            conn.commit()
+            
+            if ADMIN_CHAT_ID:
+                prev_code = get_preview_code(conn)
+                admin_text = (f"🎫New Registration Request!\n\n"
+                              f"👤Profile Summary\n"
+                              f"FB Name: {db_data.get('fb')}\n"
+                              f"Full Name: {db_data.get('full')}\n"
+                              f"Unique ID: {db_data.get('uid')}\n"
+                              f"Team: {db_data.get('team_short')}\n"
+                              f"🫆Security Code: {prev_code}")
+                kb = InlineKeyboardMarkup(row_width=2)
+                kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apr_{tg_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjr_{tg_id}"))
+                bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
+            conn.close()
+            
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.send_message(call.message.chat.id, "✅ Registration Request Submitted!\n\nYour application has been placed on admin pending!", reply_markup=main_menu(tg_id))
+            user_temp_data.pop(tg_id, None)
+        except Exception:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.send_message(call.message.chat.id, "Submission Failed❌", reply_markup=main_menu(tg_id))
 
     # User Team Change Client Logic
-    if data.startswith("tc_sel_"):
+    elif data.startswith("tc_sel_"):
         t = data.split("_")[2]
         curr = user_temp_data.get(tg_id, {}).get('current_team')
         user_temp_data[tg_id]['selected_tc'] = t
@@ -654,6 +766,43 @@ def callbacks(call):
             conn.close()
             bot.edit_message_text("✅ Team Change Request Submitted!\n\nYour application has been placed on admin pending!", call.message.chat.id, call.message.message_id)
         except Exception: pass
+
+    # --- ADMIN ADD BOT LOGIC ---
+    elif data.startswith("ab_cat_"):
+        cat = data.split("_")[2]
+        st['ab_cat'] = cat
+        st['ab_del'] = set()
+        render_ab_list(call.message.chat.id, call.message.message_id, tg_id)
+        
+    elif data.startswith("ab_tog_"):
+        bid = int(data.split("_")[2])
+        if bid in st['ab_del']: st['ab_del'].remove(bid)
+        else: st['ab_del'].add(bid)
+        render_ab_list(call.message.chat.id, call.message.message_id, tg_id)
+        
+    elif data == "ab_submit":
+        if not st['ab_del']: return
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bots_list WHERE id = ANY(%s)", (list(st['ab_del']),))
+        conn.commit()
+        conn.close()
+        st['ab_del'].clear()
+        render_ab_list(call.message.chat.id, call.message.message_id, tg_id)
+        
+    elif data == "ab_add":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        msg = bot.send_message(call.message.chat.id, "Please enter a username:", reply_markup=cancel_only_kb())
+        bot.register_next_step_handler(msg, process_add_bot)
+        
+    elif data == "ab_more_yes":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        msg = bot.send_message(call.message.chat.id, "Please enter a username:", reply_markup=cancel_only_kb())
+        bot.register_next_step_handler(msg, process_add_bot)
+        
+    elif data == "ab_more_no":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, "Username added successfully✅", reply_markup=main_menu(tg_id))
 
     # --- DIRECT MESSAGE ACTIONS (From Admin DM) ---
     elif data.startswith("dm_apr_"):
