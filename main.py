@@ -278,7 +278,7 @@ def reg_confirm(message):
             
         user_temp_data[tg_id]['team_full'] = team_full
         user_temp_data[tg_id]['team_short'] = team
-        summary = (f"👤Profile Summary\n\n"
+        summary = (f"👤Profile Summary\n"
                    f"FB Name: {user_temp_data[tg_id]['fb']}\n"
                    f"Full Name: {user_temp_data[tg_id]['full']}\n"
                    f"Unique ID: {uid}\n"
@@ -306,7 +306,7 @@ def reg_submit_final(message):
             if ADMIN_CHAT_ID:
                 prev_code = get_preview_code(conn)
                 admin_text = (f"🎫New Registration Request!\n\n"
-                              f"👤Profile Summary\n\n"
+                              f"👤Profile Summary\n"
                               f"FB Name: {data.get('fb')}\n"
                               f"Full Name: {data.get('full')}\n"
                               f"Unique ID: {data.get('uid')}\n"
@@ -371,7 +371,7 @@ def view_profile(message):
         conn.close()
         if user:
             team_disp = str(user[3]).replace("Team ", "")
-            profile_msg = (f"👤Your KBKh Profile Summary\n\n"
+            profile_msg = (f"👤Your KBKh Profile Summary\n"
                            f"FB Name: {user[0]}\n"
                            f"Full Name: {user[1]}\n"
                            f"Unique ID: {user[2]}\n"
@@ -421,8 +421,7 @@ def process_fb_submit(message):
             conn.commit()
             
             if ADMIN_CHAT_ID:
-                admin_text = (f"🎟️New Facebook Name Change Request!\n\n"
-                              f"Old FB: {old_fb}\n"
+                admin_text = (f"Old FB: {old_fb}\n"
                               f"New FB: {new_fb}\n"
                               f"Team: {team}")
                 kb = InlineKeyboardMarkup()
@@ -529,7 +528,7 @@ def render_pend_reg_list(chat_id, message_id, tg_id):
         for r in reqs:
             if r['telegram_id'] in st['exp_reg']:
                 t_disp = str(r['team_name']).replace("Team ", "")
-                prof = (f"👤Profile Summary\n\n"
+                prof = (f"👤Profile Summary\n"
                         f"FB Name: {r['fb_name']}\n"
                         f"Full Name: {r['full_name']}\n"
                         f"Unique ID: {r['unique_id']}\n"
@@ -563,8 +562,7 @@ def render_pend_fb_list(chat_id, message_id, tg_id):
         for r in reqs:
             if r['id'] in st['exp_fb']:
                 t_disp = str(r['team_name']).replace("Team ", "")
-                prof = (f"Facebook Name Change Request!\n\n"
-                        f"Old FB: {r['old_name']}\n"
+                prof = (f"Old FB: {r['old_name']}\n"
                         f"New FB: {r['new_name']}\n"
                         f"Team: {t_disp}\n\n")
                 text_parts.append(prof)
@@ -596,9 +594,8 @@ def render_pend_tc_list(chat_id, message_id, tg_id):
             if r['id'] in st['exp_tc']:
                 o_disp = str(r['old_team']).replace("Team ", "")
                 n_disp = str(r['requested_team']).replace("Team ", "")
-                prof = (f"Team Change Request!\n\n"
-                        f"FB Name: {r['fb_name']}\n\n"
-                        f"{o_disp}  ➡️  {n_disp}\n\n")
+                prof = (f"FB Name: {r['fb_name']}\n"
+                        f"{o_disp} ➡️ {n_disp}\n\n")
                 text_parts.append(prof)
                 kb.add(InlineKeyboardButton(f"{r['fb_name']} 🔻", callback_data=f"ptc_col_{r['id']}"))
                 kb.row(InlineKeyboardButton("Approve", callback_data=f"lst_apt_{r['id']}"), InlineKeyboardButton("Reject", callback_data=f"lst_rjt_{r['id']}"))
@@ -642,9 +639,8 @@ def callbacks(call):
             req_id = cursor.fetchone()[0]
             conn.commit()
             if ADMIN_CHAT_ID:
-                admin_text = (f"🎟️New Team Change Request!\n\n"
-                              f"FB Name: {fb}\n\n"
-                              f"{str(curr).replace('Team ','')}  ➡️  {sel}")
+                admin_text = (f"FB Name: {fb}\n"
+                              f"{str(curr).replace('Team ','')} ➡️ {sel}")
                 kb = InlineKeyboardMarkup()
                 kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apt_{req_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjt_{req_id}"))
                 bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
@@ -758,7 +754,7 @@ def callbacks(call):
         render_pend_reg_list(call.message.chat.id, call.message.message_id, tg_id)
     elif data.startswith("preg_exp_"):
         uid = int(data.split("_")[2])
-        if len(st['exp_reg']) >= 3: st['exp_reg'].pop() # Limit expanded profiles to prevent large message
+        if len(st['exp_reg']) >= 3: st['exp_reg'].pop() 
         st['exp_reg'].add(uid)
         render_pend_reg_list(call.message.chat.id, call.message.message_id, tg_id)
     elif data.startswith("preg_col_"):
@@ -906,7 +902,7 @@ def callbacks(call):
         for m in mems:
             if m['telegram_id'] in st['exp_mem']:
                 t_disp = str(m['team_name']).replace("Team ", "")
-                prof = (f"👤Profile Summary\n\n"
+                prof = (f"👤Profile Summary\n"
                         f"FB Name: {m['fb_name']}\n"
                         f"Full Name: {m['full_name']}\n"
                         f"Unique ID: {m['unique_id']}\n"
