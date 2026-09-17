@@ -77,6 +77,12 @@ def init_db():
                 team_category TEXT,
                 username TEXT
             );
+            CREATE TABLE IF NOT EXISTS resignation_requests (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE,
+                status TEXT DEFAULT 'Pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         conn.commit()
         conn.close()
@@ -95,6 +101,7 @@ def get_admin_state(tg_id):
     st.setdefault('exp_reg', set())
     st.setdefault('exp_fb', set())
     st.setdefault('exp_tc', set())
+    st.setdefault('exp_resg', set())
     st.setdefault('exp_mem', set())
     st.setdefault('proc_msgs', [])
     st.setdefault('ab_del', set())
@@ -154,6 +161,7 @@ def main_menu(user_id):
     elif status == "Approved":
         markup.add(KeyboardButton("My Profile"), KeyboardButton("Change FB Name"))
         markup.add(KeyboardButton("Request Team Change"), KeyboardButton("My Bots"))
+        markup.add(KeyboardButton("⚠️Resign Internship!"))
     elif status == "Pending":
         markup.add(KeyboardButton("🔄 Refresh Status"))
     elif status == "Blocked":
@@ -288,12 +296,14 @@ def process_recovery(message):
         user = cursor.fetchone()
         if user:
             old_tg = user['telegram_id']
+            cursor.execute("DELETE FROM resignation_requests WHERE telegram_id = %s", (tg_id,))
             cursor.execute("DELETE FROM fb_name_requests WHERE telegram_id = %s", (tg_id,))
             cursor.execute("DELETE FROM team_change_requests WHERE telegram_id = %s", (tg_id,))
             cursor.execute("DELETE FROM members WHERE telegram_id = %s", (tg_id,))
             cursor.execute("UPDATE members SET telegram_id = %s WHERE security_code = %s", (tg_id, sec_code))
             cursor.execute("UPDATE fb_name_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
             cursor.execute("UPDATE team_change_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
+            cursor.execute("UPDATE resignation_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
             conn.commit()
             conn.close()
             bot.send_message(message.chat.id, "Your account has been successfully recovered!✅", reply_markup=main_menu(tg_id))
@@ -375,6 +385,7 @@ def process_fb_submit(message):
                               f"Team: {team}")
                 kb = InlineKeyboardMarkup()
                 kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apf_{req_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjf_{req_id}"))
+                kb.add(InlineKeyboardButton("Cancel", callback_data="dm_cancel"))
                 bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
             conn.close()
             bot.send_message(message.chat.id, "✅ FB Name Change Request Submitted!\n\nYour application has been placed on admin pending!", reply_markup=main_menu(tg_id))
@@ -451,7 +462,29 @@ def user_my_bots(message):
         pass
 
 
-# 👑 7. ADMIN PANEL
+# ⚠️ 7. RESIGN INTERNSHIP FLOW (New Feature)
+@bot.message_handler(func=lambda msg: msg.text == "⚠️Resign Internship!")
+def resign_start(message):
+    if enforce_registration(message): return
+    tg_id = message.from_user.id
+    if get_user_status(tg_id) != "Approved": return
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM resignation_requests WHERE telegram_id = %s AND status = 'Pending'", (tg_id,))
+        if cursor.fetchone():
+            conn.close()
+            return bot.send_message(message.chat.id, "Your application is currently pending administrative review.⏳\n Please wait for the administrator’s approval!", reply_markup=main_menu(tg_id))
+        conn.close()
+    except Exception: pass
+    
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.row(InlineKeyboardButton("Yes✅", callback_data="resg_yes"), InlineKeyboardButton("No❌", callback_data="resg_no"))
+    bot.send_message(message.chat.id, "Are you sure you want to resign from your ongoing internship?", reply_markup=kb)
+
+
+# 👑 8. ADMIN PANEL
 @bot.message_handler(func=lambda msg: msg.text == "Pending Applications")
 def admin_pend(message):
     if str(message.from_user.id) != ADMIN_CHAT_ID: return
@@ -467,12 +500,15 @@ def render_admin_pend_menu(chat_id, message_id=None):
         c2 = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM team_change_requests tc JOIN members m ON tc.telegram_id = m.telegram_id WHERE tc.status = 'Pending' AND m.is_blocked = FALSE AND m.is_removed = FALSE")
         c3 = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM resignation_requests rr JOIN members m ON rr.telegram_id = m.telegram_id WHERE rr.status = 'Pending'")
+        c4 = cursor.fetchone()[0]
         conn.close()
         
         kb = InlineKeyboardMarkup(row_width=1)
         kb.add(InlineKeyboardButton(f"🎫Registration Application - {c1}", callback_data="in_ad_p_reg"),
                InlineKeyboardButton(f"🎟️Fb Name Change Application - {c2}", callback_data="in_ad_p_fb"),
                InlineKeyboardButton(f"Team Change Application - {c3}", callback_data="in_ad_p_tc"),
+               InlineKeyboardButton(f"⚠️Resignation Application - {c4}", callback_data="in_ad_p_resg"),
                InlineKeyboardButton("Cancel", callback_data="ad_cancel_msg"))
         text = "Pending Applications:"
         if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
@@ -650,6 +686,40 @@ def render_pend_tc_list(chat_id, message_id, tg_id):
     final_text = "".join(text_parts).strip() if text_parts else "Empty"
     bot.edit_message_text(final_text, chat_id, message_id, reply_markup=kb)
 
+def render_pend_resg_list(chat_id, message_id, tg_id):
+    st = get_admin_state(tg_id)
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT rr.*, m.fb_name, m.full_name, m.unique_id, m.team_name, m.security_code FROM resignation_requests rr JOIN members m ON rr.telegram_id = m.telegram_id WHERE rr.status = 'Pending'")
+    reqs = cursor.fetchall()
+    
+    text_parts = []
+    if st['proc_msgs']: text_parts.extend(st['proc_msgs'])
+    
+    kb = InlineKeyboardMarkup(row_width=1)
+    if not reqs:
+        text_parts.append("No Resignation Applications found.")
+    else:
+        for r in reqs:
+            if r['telegram_id'] in st['exp_resg']:
+                t_disp = str(r['team_name']).replace("Team ", "")
+                prof = (f"👤Profile Summary\n"
+                        f"FB Name: {r['fb_name']}\n"
+                        f"Full Name: {r['full_name']}\n"
+                        f"Unique ID: {r['unique_id']}\n"
+                        f"Team: {t_disp}\n"
+                        f"🫆Security Code: {r['security_code']}\n\n")
+                text_parts.append(prof)
+                kb.add(InlineKeyboardButton(f"{r['fb_name']} 🔻", callback_data=f"presg_col_{r['telegram_id']}"))
+                kb.row(InlineKeyboardButton("Approve", callback_data=f"lst_aprs_{r['telegram_id']}"), InlineKeyboardButton("Reject", callback_data=f"lst_rjrs_{r['telegram_id']}"))
+            else:
+                kb.add(InlineKeyboardButton(f"{r['fb_name']} 🔺", callback_data=f"presg_exp_{r['telegram_id']}"))
+    
+    conn.close()
+    kb.row(InlineKeyboardButton("Back", callback_data="ad_back_pend"), InlineKeyboardButton("Cancel", callback_data="ad_cancel_msg"))
+    final_text = "".join(text_parts).strip() if text_parts else "Empty"
+    bot.edit_message_text(final_text, chat_id, message_id, reply_markup=kb)
+
 
 # 🔘 INLINE CALLBACKS
 @bot.callback_query_handler(func=lambda call: True)
@@ -660,8 +730,40 @@ def callbacks(call):
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     
+    # ⚠️ RESIGNATION USER CALLBACKS
+    if data == "resg_no":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        
+    elif data == "resg_yes":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("INSERT INTO resignation_requests (telegram_id, status) VALUES (%s, 'Pending') ON CONFLICT (telegram_id) DO UPDATE SET status = 'Pending' RETURNING id", (tg_id,))
+            cursor.execute("SELECT fb_name, full_name, unique_id, team_name, security_code FROM members WHERE telegram_id = %s", (tg_id,))
+            user = cursor.fetchone()
+            conn.commit()
+            
+            if ADMIN_CHAT_ID and user:
+                t_disp = str(user['team_name']).replace("Team ", "")
+                admin_text = (f"⚠️New Resignation Request!\n\n"
+                              f"👤Profile Summary\n"
+                              f"FB Name: {user['fb_name']}\n"
+                              f"Full Name: {user['full_name']}\n"
+                              f"Unique ID: {user['unique_id']}\n"
+                              f"Team: {t_disp}\n"
+                              f"🫆Security Code: {user['security_code']}")
+                kb = InlineKeyboardMarkup()
+                kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_aprs_{tg_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjrs_{tg_id}"))
+                kb.add(InlineKeyboardButton("Cancel", callback_data="dm_cancel"))
+                bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
+            conn.close()
+            bot.send_message(call.message.chat.id, "Your application is currently pending administrative review.⏳\n Please wait for the administrator’s approval!", reply_markup=main_menu(tg_id))
+        except Exception:
+            pass
+
     # 📝 INLINE REGISTRATION SELECTION LOGIC 
-    if data.startswith("reg_t_"):
+    elif data.startswith("reg_t_"):
         team = data.split("_")[2]
         team_full = f"Team {team}"
         uid = user_temp_data[tg_id].get('uid')
@@ -726,6 +828,7 @@ def callbacks(call):
                               f"🫆Security Code: {prev_code}")
                 kb = InlineKeyboardMarkup(row_width=2)
                 kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apr_{tg_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjr_{tg_id}"))
+                kb.add(InlineKeyboardButton("Cancel", callback_data="dm_cancel"))
                 bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
             conn.close()
             
@@ -762,6 +865,7 @@ def callbacks(call):
                               f"{str(curr).replace('Team ','')} ➡️ {sel}")
                 kb = InlineKeyboardMarkup()
                 kb.row(InlineKeyboardButton("Approve", callback_data=f"dm_apt_{req_id}"), InlineKeyboardButton("Reject", callback_data=f"dm_rjt_{req_id}"))
+                kb.add(InlineKeyboardButton("Cancel", callback_data="dm_cancel"))
                 bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=kb)
             conn.close()
             bot.edit_message_text("✅ Team Change Request Submitted!\n\nYour application has been placed on admin pending!", call.message.chat.id, call.message.message_id)
@@ -805,6 +909,9 @@ def callbacks(call):
         bot.send_message(call.message.chat.id, "Username added successfully✅", reply_markup=main_menu(tg_id))
 
     # --- DIRECT MESSAGE ACTIONS (From Admin DM) ---
+    elif data == "dm_cancel":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+
     elif data.startswith("dm_apr_"):
         uid = int(data.split("_")[2])
         conn = get_db_connection()
@@ -819,7 +926,7 @@ def callbacks(call):
         if user:
             t_disp = str(user['team_name']).replace("Team ", "")
             msg = f"Registration approval was successful!✅\n\nWelcome {user['full_name']}!\n\nTeam: {t_disp}\n\nYour Security Code: {code}\n\n⚠️Please do not share you security code with anyone."
-            try: bot.send_message(uid, msg)
+            try: bot.send_message(uid, msg, reply_markup=main_menu(uid))
             except: pass
             
     elif data.startswith("dm_rjr_"):
@@ -830,7 +937,7 @@ def callbacks(call):
         conn.commit()
         conn.close()
         bot.edit_message_text(f"Registration Rejected❌\n\n{call.message.text}", call.message.chat.id, call.message.message_id)
-        try: bot.send_message(uid, "Registration Failed❌\nPlease Try Again.")
+        try: bot.send_message(uid, "Registration Failed❌\nPlease Try Again.", reply_markup=main_menu(uid))
         except: pass
 
     elif data.startswith("dm_apf_"):
@@ -888,6 +995,53 @@ def callbacks(call):
             try: bot.send_message(req['telegram_id'], "Your request to change your Team has been Failed❌")
             except: pass
 
+    elif data.startswith("dm_aprs_") or data.startswith("lst_aprs_"):
+        uid = int(data.split("_")[2])
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT fb_name FROM members WHERE telegram_id = %s", (uid,))
+        user = cursor.fetchone()
+        
+        # ⚠️ Powerful wipeout from all database tables
+        cursor.execute("DELETE FROM resignation_requests WHERE telegram_id = %s", (uid,))
+        cursor.execute("DELETE FROM fb_name_requests WHERE telegram_id = %s", (uid,))
+        cursor.execute("DELETE FROM team_change_requests WHERE telegram_id = %s", (uid,))
+        cursor.execute("DELETE FROM members WHERE telegram_id = %s", (uid,))
+        conn.commit()
+        conn.close()
+        
+        if data.startswith("dm_aprs_"):
+            bot.edit_message_text(f"Resignation Approved✅\n\n{call.message.text}", call.message.chat.id, call.message.message_id)
+        else:
+            st['exp_resg'].discard(uid)
+            if user: st['proc_msgs'].append(f"{user['fb_name']} - Resignation Approved✅\n\n")
+            render_pend_resg_list(call.message.chat.id, call.message.message_id, tg_id)
+            
+        try: 
+            # ⚠️ Resetting their menu layout as an unregistered user
+            bot.send_message(uid, "Your resignation application has been approved. ✅\n\nThank you very much for being a valued member of the KBKh Team. We truly appreciate your time, dedication, and contributions. Wishing you all the very best in your future endeavors.❤️", reply_markup=main_menu(uid))
+        except: pass
+
+    elif data.startswith("dm_rjrs_") or data.startswith("lst_rjrs_"):
+        uid = int(data.split("_")[2])
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("DELETE FROM resignation_requests WHERE telegram_id = %s RETURNING id", (uid,))
+        cursor.execute("SELECT fb_name FROM members WHERE telegram_id = %s", (uid,))
+        user = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        
+        if data.startswith("dm_rjrs_"):
+            bot.edit_message_text(f"Resignation Rejected❌\n\n{call.message.text}", call.message.chat.id, call.message.message_id)
+        else:
+            st['exp_resg'].discard(uid)
+            if user: st['proc_msgs'].append(f"{user['fb_name']} - Application Rejected❌\n\n")
+            render_pend_resg_list(call.message.chat.id, call.message.message_id, tg_id)
+            
+        try: bot.send_message(uid, "Your resignation application has been rejected. ❌")
+        except: pass
+
     # --- ADMIN INLINE NAVIGATION (Single Page) ---
     elif data == "ad_cancel_msg":
         st['proc_msgs'].clear()
@@ -898,6 +1052,7 @@ def callbacks(call):
         st['exp_reg'].clear()
         st['exp_fb'].clear()
         st['exp_tc'].clear()
+        st['exp_resg'].clear()
         render_admin_pend_menu(call.message.chat.id, call.message.message_id)
         
     elif data == "ad_back_mem":
@@ -944,6 +1099,19 @@ def callbacks(call):
         st['exp_tc'].discard(rid)
         render_pend_tc_list(call.message.chat.id, call.message.message_id, tg_id)
 
+    elif data == "in_ad_p_resg":
+        st['proc_msgs'].clear()
+        render_pend_resg_list(call.message.chat.id, call.message.message_id, tg_id)
+    elif data.startswith("presg_exp_"):
+        uid = int(data.split("_")[2])
+        if len(st['exp_resg']) >= 3: st['exp_resg'].pop() 
+        st['exp_resg'].add(uid)
+        render_pend_resg_list(call.message.chat.id, call.message.message_id, tg_id)
+    elif data.startswith("presg_col_"):
+        uid = int(data.split("_")[2])
+        st['exp_resg'].discard(uid)
+        render_pend_resg_list(call.message.chat.id, call.message.message_id, tg_id)
+
     # List Actions
     elif data.startswith("lst_apr_"):
         uid = int(data.split("_")[2])
@@ -960,7 +1128,7 @@ def callbacks(call):
             st['proc_msgs'].append(f"{user['fb_name']} - Registration Approved✅\n\n")
             t_disp = str(user['team_name']).replace("Team ", "")
             msg = f"Registration approval was successful!✅\n\nWelcome {user['full_name']}!\n\nTeam: {t_disp}\n\nYour Security Code: {code}\n\n⚠️Please do not share you security code with anyone."
-            try: bot.send_message(uid, msg)
+            try: bot.send_message(uid, msg, reply_markup=main_menu(uid))
             except: pass
         render_pend_reg_list(call.message.chat.id, call.message.message_id, tg_id)
 
@@ -975,7 +1143,7 @@ def callbacks(call):
         
         st['exp_reg'].discard(uid)
         if user: st['proc_msgs'].append(f"{user['fb_name']} - Application Rejected❌\n\n")
-        try: bot.send_message(uid, "Registration Failed❌\nPlease Try Again.")
+        try: bot.send_message(uid, "Registration Failed❌\nPlease Try Again.", reply_markup=main_menu(uid))
         except: pass
         render_pend_reg_list(call.message.chat.id, call.message.message_id, tg_id)
 
