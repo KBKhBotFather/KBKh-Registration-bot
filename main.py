@@ -304,6 +304,13 @@ def process_recovery(message):
             cursor.execute("UPDATE fb_name_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
             cursor.execute("UPDATE team_change_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
             cursor.execute("UPDATE resignation_requests SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
+            
+            # Update BKLn Task records if telegram_id changed
+            try:
+                cursor.execute("UPDATE task_records SET telegram_id = %s WHERE telegram_id = %s", (tg_id, old_tg))
+            except Exception:
+                pass
+            
             conn.commit()
             conn.close()
             bot.send_message(message.chat.id, "Your account has been successfully recovered!✅", reply_markup=main_menu(tg_id))
@@ -1002,10 +1009,14 @@ def callbacks(call):
         cursor.execute("SELECT fb_name FROM members WHERE telegram_id = %s", (uid,))
         user = cursor.fetchone()
         
-        # ⚠️ Powerful wipeout from all database tables
+        # ⚠️ Powerful wipeout from all database tables (Registration + Task Bot)
         cursor.execute("DELETE FROM resignation_requests WHERE telegram_id = %s", (uid,))
         cursor.execute("DELETE FROM fb_name_requests WHERE telegram_id = %s", (uid,))
         cursor.execute("DELETE FROM team_change_requests WHERE telegram_id = %s", (uid,))
+        try:
+            cursor.execute("DELETE FROM task_records WHERE telegram_id = %s", (uid,)) # BKLn Task Bot Data wipe
+        except Exception:
+            pass
         cursor.execute("DELETE FROM members WHERE telegram_id = %s", (uid,))
         conn.commit()
         conn.close()
